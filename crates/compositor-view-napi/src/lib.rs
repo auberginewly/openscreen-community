@@ -11,8 +11,9 @@ use napi::{Env, JsFunction, Task};
 use napi_derive::napi;
 use openscreen_compositor::compositor::{live_params_from_scene, Compositor};
 use openscreen_compositor::d3d::{Backend, Gpu};
+use openscreen_compositor::export_control::{ExportCancelled, ExportControl};
+use openscreen_compositor::frame_geometry::FootageQuad;
 use openscreen_compositor::gif_export::{GifExportParams, GifStats};
-use openscreen_compositor::gif_export_control::{GifExportCancelled, GifExportControl};
 use openscreen_compositor::live::{LiveView, PausedPreviews};
 use openscreen_compositor::scene::Scene;
 use openscreen_compositor::{config, pipeline};
@@ -87,6 +88,56 @@ pub fn segmentation_runtime_available() -> bool {
     openscreen_compositor::segmentation::runtime_available()
 }
 
+pub struct SegmentFrameTask {
+    model_path: String,
+    rgba: Vec<u8>,
+}
+
+impl Task for SegmentFrameTask {
+    type Output = Vec<u8>;
+    type JsValue = Buffer;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        let rgb: Vec<u8> = self
+            .rgba
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect();
+        // ponytail: une session ONNX chargée par appel (quelques dizaines de ms), parce qu'il
+        // n'y a qu'un appel par caméra et par ouverture du panneau. À garder en cache si un
+        // appelant se met à segmenter en continu.
+        let mut segmenter = openscreen_compositor::segmentation::Segmenter::load(
+            std::path::Path::new(&self.model_path),
+        )
+        .map_err(|e| Error::from_reason(format!("{e:#}")))?;
+        segmenter
+            .run(&rgb)
+            .map(<[u8]>::to_vec)
+            .map_err(|e| Error::from_reason(format!("{e:#}")))
+    }
+
+    fn resolve(&mut self, _env: Env, mask: Self::Output) -> Result<Self::JsValue> {
+        Ok(mask.into())
+    }
+}
+
+/// Masque du sujet pour UNE image, sans vue : la vignette de recadrage du panneau caméra s'en
+/// sert pour montrer le fond choisi sur sa propre frame.
+///
+/// `rgba` est une frame RGBA8 déjà réduite à la taille du modèle (`segmentation::MODEL_WIDTH` x
+/// `MODEL_HEIGHT`), soit le `getImageData` d'un canvas tel quel. Le retour a le format de
+/// `Segmenter::run` : un octet par pixel, 0 = fond, 255 = sujet.
+///
+/// `AsyncTask`, comme `remux_seekable` : charger la session prend plus longtemps que l'inférence,
+/// et ce temps n'a rien à faire sur le thread principal de Node.
+#[napi]
+pub fn segment_frame(model_path: String, rgba: Buffer) -> AsyncTask<SegmentFrameTask> {
+    AsyncTask::new(SegmentFrameTask {
+        model_path,
+        rgba: rgba.to_vec(),
+    })
+}
+
 #[napi]
 pub fn create_view(
     rect: CompositorViewRect,
@@ -147,6 +198,16 @@ pub struct FramePacket {
     /// R,G,B,A tightly-packed, `width * height * 4` octets — ce que `putImageData` /
     /// `ImageData` attendent côté JS (canvas 2D, format natif RGBA8).
     pub data: Buffer,
+    /// Le métrage dans cette image : ses coins TL, TR, BR, BL (x, y en fractions de l'image,
+    /// huit nombres), là où l'éditeur pose le gimbal d'un flou. Absent avant toute composition.
+    pub footage: Option<Vec<f64>>,
+    /// Le métrage passe de ses coins à l'image par leur homographie (caméra réelle), pas par
+    /// leur interpolation bilinéaire.
+    pub footage_projective: bool,
+    /// Clip actif de la scène quand la frame a été composée (`FramePosition`).
+    pub clip_index: u32,
+    /// Temps source de la frame écran composée, en secondes.
+    pub source_time_sec: f64,
 }
 
 /// Renvoie la dernière frame readback du thread de rendu SI elle est plus récente que
@@ -186,19 +247,97 @@ pub fn read_frame(id: i32, since_gen: f64) -> Result<Option<FramePacket>> {
             v.latest_frame_since(since_gen.max(0.0) as u64)
         }
     };
-    Ok(slot.map(|(gen, w, h, pixels)| {
+    Ok(slot.map(|(gen, w, h, pixels, footage, position)| {
         debug_assert_eq!(pixels.len(), (w as usize) * (h as usize) * 4);
         FramePacket {
             gen: gen as f64,
             width: w,
             height: h,
             data: Buffer::from(pixels),
+            footage: footage_corners(footage),
+            footage_projective: footage.is_some_and(|q| q.projective),
+            clip_index: position.clip_index,
+            source_time_sec: position.source_time_sec,
         }
     }))
 }
 
+/// Les coins du métrage (TL, TR, BR, BL) aplatis en huit nombres, tels que JS les lit.
+fn footage_corners(footage: Option<FootageQuad>) -> Option<Vec<f64>> {
+    footage.map(|q| q.corners.iter().flatten().map(|&v| v as f64).collect())
+}
+
+/// Une frame de preview posée dans une texture partagée : de quoi l'importer côté GPU
+/// (`sharedTexture.importSharedTexture`) au lieu d'en recevoir les pixels.
+#[napi(object)]
+pub struct SharedFramePacket {
+    pub gen: f64,
+    /// Case de l'anneau qui porte la frame, à rendre avec `gen` par `release_shared_frame`
+    /// quand Chromium l'a relâchée.
+    pub slot: u32,
+    /// Handle NT de la texture, 8 octets little-endian : la forme qu'attend Electron
+    /// (`SharedTextureHandle.ntHandle`). Valable dans ce processus seulement.
+    pub handle: Buffer,
+    pub width: u32,
+    pub height: u32,
+    pub footage: Option<Vec<f64>>,
+    pub footage_projective: bool,
+    pub clip_index: u32,
+    pub source_time_sec: f64,
+}
+
+/// Livrer les frames de la vue par textures partagées plutôt que par `read_frame`. Rend
+/// `false` quand la machine ne le peut pas (hors Windows, backend logiciel) : la vue reste
+/// alors au readback.
+#[napi]
+pub fn set_shared_frames(id: i32, enabled: bool) -> bool {
+    registry()
+        .lock()
+        .unwrap()
+        .get(&id)
+        .is_some_and(|v| v.set_shared_frames(enabled))
+}
+
+/// Le pendant de `read_frame` pour une vue en textures partagées : la dernière frame posée
+/// dans l'anneau, si elle est plus récente que `since_gen`. Sa case reste tenue jusqu'à
+/// `release_shared_frame`. `Ok(None)` aussi quand la vue relit en RAM.
+#[napi]
+pub fn read_shared_frame(id: i32, since_gen: f64) -> Result<Option<SharedFramePacket>> {
+    let frame = match registry().lock().unwrap().get(&id) {
+        None => return Ok(None),
+        Some(v) => {
+            // Même relais que `read_frame` : sans lui, un thread de rendu mort ne se verrait
+            // que par un canvas noir.
+            if let Some(fatal) = v.fatal_error() {
+                return Err(Error::from_reason(fatal));
+            }
+            v.take_shared_frame(since_gen.max(0.0) as u64)
+        }
+    };
+    Ok(frame.map(|f| SharedFramePacket {
+        gen: f.gen as f64,
+        slot: f.slot,
+        handle: f.handle.to_le_bytes().to_vec().into(),
+        width: f.width,
+        height: f.height,
+        footage: footage_corners(f.footage),
+        footage_projective: f.footage.is_some_and(|q| q.projective),
+        clip_index: f.position.clip_index,
+        source_time_sec: f.position.source_time_sec,
+    }))
+}
+
+/// Chromium a relâché la frame `gen` de la case `slot` (`allReferencesReleased` côté
+/// Electron) : le thread de rendu peut y réécrire. Sans effet sur une vue détruite.
+#[napi]
+pub fn release_shared_frame(id: i32, slot: u32, gen: f64) {
+    if let Some(v) = registry().lock().unwrap().get(&id) {
+        v.release_shared_frame(slot, gen.max(0.0) as u64);
+    }
+}
+
 /// Param live (inspector). Le type de valeur route vers le bon setter :
-/// bool = switch (backgroundBlur…), number = slider (shadow/roundness/motionBlur),
+/// bool = switch (webcamMirror…), number = slider (shadow/roundness/motionBlur/backgroundBlur),
 /// string = sélection (backgroundColor "#rrggbb").
 #[napi]
 pub fn set_param(id: i32, key: String, value: Either3<bool, f64, String>) {
@@ -442,6 +581,9 @@ pub struct ExportParamsInput {
     /// "h264" | "h265". Toute autre valeur (ex. "vp9", pas d'équivalent matériel AMF) fait
     /// échouer l'export avec un message clair plutôt que de silencieusement retomber sur h264.
     pub codec: Option<String>,
+    /// Débit vidéo visé, en bits/s, calculé par l'app d'après la taille et la cadence.
+    /// Absent ou nul → le repli du pipeline, qui ignore la cadence.
+    pub bitrate: Option<u32>,
 }
 
 /// Export multiclip mesuré (worker libuv). Rend la vraie timeline (clips + trims) en un MP4.
@@ -455,6 +597,7 @@ pub struct ExportMultiTask {
     clips: Vec<pipeline::ClipSource>,
     scene_json: Option<String>,
     params: Option<ExportParamsInput>,
+    control: ExportControl,
     on_progress: Option<ThreadsafeFunction<u32, ErrorStrategy::Fatal>>,
 }
 
@@ -463,12 +606,14 @@ impl Task for ExportMultiTask {
     type JsValue = ExportStats;
 
     fn compute(&mut self) -> Result<Self::Output> {
+        self.control.check().map_err(mp4_task_error)?;
         // Previews paused for the whole render (GPU 3D engine freed) and restored
         // exactly as found when this guard drops, including on the error paths.
         let _previews = PreviewPause::begin();
         // Même sélection que la preview : l'export d'un hôte sans GPU passe par
         // libopenh264 au lieu d'AMF, plutôt que d'échouer.
         let gpu = Gpu::create_auto(false).map_err(|e| Error::from_reason(format!("{e:#}")))?;
+        self.control.check().map_err(mp4_task_error)?;
         let mut cfg = config::all().pop().expect("au moins une config"); // C8
         cfg.zoom = false;
         cfg.layout_anim = false;
@@ -496,6 +641,7 @@ impl Task for ExportMultiTask {
         export_params.height = height;
         if let Some(p) = &self.params {
             export_params.fps = p.fps;
+            export_params.bit_rate = p.bitrate.filter(|&b| b > 0).map(i64::from);
             if let Some(codec) = &p.codec {
                 export_params.codec = match codec.as_str() {
                     "h264" => pipeline::ExportCodec::H264,
@@ -527,7 +673,7 @@ impl Task for ExportMultiTask {
         comp.set_scene(scene);
 
         let mut progress = throttled_progress(self.on_progress.take());
-        let s = pipeline::run_composited_multi(
+        let s = pipeline::run_composited_multi_cancellable(
             &self.clips,
             &self.out_path,
             &gpu,
@@ -535,8 +681,9 @@ impl Task for ExportMultiTask {
             &cfg,
             &export_params,
             &mut progress,
+            &self.control,
         )
-        .map_err(|e| Error::from_reason(format!("{e:#}")))?;
+        .map_err(mp4_task_error)?;
         Ok((s.frames as u32, s.wall_s, s.fps, s.video_duration_s))
     }
 
@@ -545,11 +692,34 @@ impl Task for ExportMultiTask {
     }
 }
 
+/// Le pendant MP4 de `create_gif_export_control` : même contrôle, passé à `export_multi`. Sa
+/// présence dit aussi au TS que cet addon sait annuler un MP4 — un `.node` plus ancien ignore le
+/// contrôle, et son export va au bout.
+#[napi]
+pub fn create_mp4_export_control() -> External<ExportControl> {
+    External::new(ExportControl::default())
+}
+
+#[napi]
+pub fn cancel_mp4_export(control: External<ExportControl>) -> bool {
+    control.cancel()
+}
+
+fn mp4_task_error(error: anyhow::Error) -> Error {
+    if error.is::<ExportCancelled>() {
+        Error::from_reason("MP4_EXPORT_CANCELLED")
+    } else {
+        Error::from_reason(format!("{error:#}"))
+    }
+}
+
 /// Lance un export multiclip natif (vraie timeline → MP4) et résout `Promise<ExportStats>`.
 /// `scene_json` : même `SceneDescription` que la preview (fond/layout/webcam/effets/curseur).
 /// `params` : taille/cadence/codec de sortie voulus (absent → 1920x1080/fps du 1er clip/h264).
 /// `on_progress(framesEncodées)` optionnel — rappelé côté JS à ~10 Hz max pendant le rendu ;
 /// le JS calcule lui-même le pourcentage (il connaît déjà le total attendu, durée×fps des clips).
+/// `control` optionnel (`create_mp4_export_control`) : l'annuler arrête le rendu entre deux
+/// frames, rejette avec `MP4_EXPORT_CANCELLED` et ne laisse aucun fichier.
 #[napi]
 pub fn export_multi(
     clips: Vec<ClipInput>,
@@ -557,6 +727,7 @@ pub fn export_multi(
     scene_json: Option<String>,
     params: Option<ExportParamsInput>,
     on_progress: Option<JsFunction>,
+    control: Option<External<ExportControl>>,
 ) -> Result<AsyncTask<ExportMultiTask>> {
     let clips = clips
         .into_iter()
@@ -574,16 +745,15 @@ pub fn export_multi(
         clips,
         scene_json,
         params,
+        control: control.map(|c| (*c).clone()).unwrap_or_default(),
         on_progress: make_progress_tsfn(on_progress)?,
     }))
 }
 
 /// Sortie GIF native (slice 1) — taille, cadence, compteur de loop, dithering.
-/// Tout optionnel : absent → 854×480, 12 fps, boucle infinie, pas de
-/// dithering. Les défauts sont choisis pour un export « petit / net » :
-/// GIF est un format 256-couleurs, 12 fps est la cadence historique de
-/// `gif.js` côté renderer, et 854×480 tient confortablement dans la
-/// palette 8 bits sans banding visible sur du contenu de présentation.
+/// Tout optionnel : absent → 854×480, 12 fps, boucle infinie, dithering
+/// Floyd-Steinberg. GIF est un format 256-couleurs et 12 fps est la cadence
+/// historique de `gif.js` côté renderer.
 #[napi(object)]
 pub struct GifParamsInput {
     pub width: Option<u32>,
@@ -591,9 +761,8 @@ pub struct GifParamsInput {
     pub fps: Option<u32>,
     /// Compteur de loop GIF : `None` ou `0` = infini, sinon `n` boucles.
     pub loop_count: Option<u16>,
-    /// Floyd-Steinberg error diffusion avant quantification. Off par
-    /// défaut (qualité acceptable sans, et ça double تقريبًا le coût
-    /// CPU du quantize par frame).
+    /// Floyd-Steinberg error diffusion à la quantification. Actif par défaut :
+    /// sans lui, un fond en dégradé se découpe en bandes (cf. `GifExportParams`).
     pub dither: Option<bool>,
 }
 
@@ -612,17 +781,17 @@ pub struct GifParamsInput {
 /// `Compositor` (équivalent de `cfg.cursor = false` dans
 /// `run_composited_multi`).
 #[napi]
-pub fn create_gif_export_control() -> External<GifExportControl> {
-    External::new(GifExportControl::default())
+pub fn create_gif_export_control() -> External<ExportControl> {
+    External::new(ExportControl::default())
 }
 
 #[napi]
-pub fn cancel_gif_export(control: External<GifExportControl>) -> bool {
+pub fn cancel_gif_export(control: External<ExportControl>) -> bool {
     control.cancel()
 }
 
 fn gif_task_error(error: anyhow::Error) -> Error {
-    if error.is::<GifExportCancelled>() {
+    if error.is::<ExportCancelled>() {
         Error::from_reason("GIF_EXPORT_CANCELLED")
     } else {
         Error::from_reason(format!("{error:#}"))
@@ -639,7 +808,7 @@ pub struct ExportGifTask {
     scene_json: Option<String>,
     out_path: PathBuf,
     params: GifExportParams,
-    control: GifExportControl,
+    control: ExportControl,
     on_progress: Option<ThreadsafeFunction<u32, ErrorStrategy::Fatal>>,
 }
 
@@ -737,7 +906,7 @@ pub fn export_gif(
     scene_json: Option<String>,
     params: Option<GifParamsInput>,
     on_progress: Option<JsFunction>,
-    control: Option<External<GifExportControl>>,
+    control: Option<External<ExportControl>>,
 ) -> Result<AsyncTask<ExportGifTask>> {
     // Deliberately the same argument shape as `export_multi`: the caller builds
     // one clip list and one scene, and picks the container. Cursor comes from
@@ -759,7 +928,7 @@ pub fn export_gif(
             height: p.height,
             fps: p.fps,
             loop_count: p.loop_count,
-            dither: p.dither.unwrap_or(false),
+            dither: p.dither.unwrap_or(GifExportParams::default().dither),
         })
         .unwrap_or_default();
     Ok(AsyncTask::new(ExportGifTask {
@@ -823,4 +992,33 @@ pub fn remux_seekable(input_path: String, output_path: String) -> AsyncTask<Remu
         input_path,
         output_path,
     })
+}
+
+pub struct LoudnessGainTask {
+    path: String,
+}
+
+impl Task for LoudnessGainTask {
+    type Output = f64;
+    type JsValue = f64;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(f64::from(openscreen_compositor::audio::loudness_gain_db(&self.path)))
+    }
+
+    fn resolve(&mut self, _env: Env, out: Self::Output) -> Result<Self::JsValue> {
+        Ok(out)
+    }
+}
+
+/// Le gain de normalisation de loudness (dB) que l'export applique à ce fichier voix — le
+/// même nombre, par la même fonction, pour que la preview de l'éditeur joue la voix au
+/// niveau où l'export l'écrira. Voir `openscreen_compositor::audio::loudness_gain_db`.
+///
+/// `AsyncTask` : la mesure décode tout l'audio du fichier, ce qui se compte en secondes sur
+/// un long enregistrement. Le résultat est mis en cache dans le processus, donc l'export qui
+/// suit ne le refait pas.
+#[napi]
+pub fn loudness_gain_db(path: String) -> AsyncTask<LoudnessGainTask> {
+    AsyncTask::new(LoudnessGainTask { path })
 }

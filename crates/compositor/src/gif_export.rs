@@ -74,7 +74,7 @@
 use crate::compositor::Compositor;
 use crate::config::Cfg;
 use crate::d3d::Gpu;
-use crate::gif_export_control::{with_gif_output, GifExportControl};
+use crate::export_control::{with_staged_output, ExportControl};
 use crate::pipeline::{ClipSource, Decoder};
 use crate::timeline_walk::walk_composited_timeline;
 use anyhow::{anyhow, bail, Context, Result};
@@ -133,10 +133,12 @@ pub struct GifExportParams {
 	/// `None` or `0` → infinite loop (the historical GIF default).
 	/// Otherwise finite count.
 	pub loop_count: Option<u16>,
-	/// Floyd-Steinberg dithering before quantization. Default off —
-	/// the quantized result without dithering is usually acceptable
-	/// for screen content, and dithering roughly doubles the per-frame
-	/// CPU cost.
+	/// Floyd-Steinberg dithering at quantization. Default ON: the median
+	/// cut spreads its 256 entries over the whole frame, so a gradient
+	/// wallpaper gets a few dozen of them and, mapped to the nearest one,
+	/// breaks into flat bands. Error diffusion keeps its local average on
+	/// the ramp, and leaves a flat area flat: a colour that is in the
+	/// palette has no error to spread.
 	pub dither: bool,
 }
 
@@ -147,7 +149,7 @@ impl Default for GifExportParams {
 			height: Some(DEFAULT_GIF_HEIGHT),
 			fps: Some(DEFAULT_GIF_FPS),
 			loop_count: None, // infinite
-			dither: false,
+			dither: true,
 		}
 	}
 }
@@ -171,7 +173,7 @@ pub fn export_gif(
 	params: &GifExportParams,
 	progress: &mut dyn FnMut(u64),
 ) -> Result<GifStats> {
-    export_gif_cancellable(clips, out_path, gpu, comp, cfg, params, progress, &GifExportControl::default())
+    export_gif_cancellable(clips, out_path, gpu, comp, cfg, params, progress, &ExportControl::default())
 }
 
 pub fn export_gif_cancellable(
@@ -182,9 +184,9 @@ pub fn export_gif_cancellable(
     cfg: &Cfg,
     params: &GifExportParams,
     progress: &mut dyn FnMut(u64),
-    control: &GifExportControl,
+    control: &ExportControl,
 ) -> Result<GifStats> {
-    with_gif_output(out_path, control, |file, staging_path| {
+    with_staged_output(out_path, control, |file, staging_path| {
         export_gif_inner(clips, staging_path, file, gpu, comp, cfg, params, progress, control)
     })
 }
@@ -198,7 +200,7 @@ fn export_gif_inner(
 	cfg: &Cfg,
 	params: &GifExportParams,
 	progress: &mut dyn FnMut(u64),
-	control: &GifExportControl,
+	control: &ExportControl,
 ) -> Result<GifStats> {
 	control.check()?;
 	if clips.is_empty() {
@@ -1369,6 +1371,64 @@ mod tests {
 			&mut indices,
 		);
 		assert!((indices[0] as usize) < PALETTE_COLORS);
+	}
+
+	/// What the dithering is for: a smooth ramp against a palette too coarse for it. That is
+	/// what a real frame hands a wallpaper gradient, since the median cut spreads 256 entries
+	/// over the whole frame, not over the one gradient. Nearest-colour mapping flattens the ramp
+	/// into wide bands; Floyd-Steinberg keeps its local average on the ramp.
+	#[test]
+	fn dithering_keeps_a_gradient_on_its_ramp_where_plain_mapping_bands() {
+		let (w, h) = (512usize, 8usize);
+		let ramp = |x: usize| (64 + x / 4) as u8; // grey 64..=191, a new level every 4 px
+		let rgba: Vec<u8> = (0..h)
+			.flat_map(|_| (0..w).flat_map(move |x| [ramp(x), ramp(x), ramp(x), 255]))
+			.collect();
+		// 16 greys, 17 levels apart, repeated to fill the 256 entries.
+		let palette: Vec<u8> =
+			(0..PALETTE_COLORS).flat_map(|i| [((i % 16) * 17) as u8; 3]).collect();
+
+		let mut plain = vec![0u8; w * h];
+		map_to_indices(&palette, &rgba, &mut plain);
+		let mut dithered = vec![0u8; w * h];
+		let (mut err_cur, mut err_next) = (vec![0.0f32; w * 3], vec![0.0f32; w * 3]);
+		map_to_indices_dithered(
+			&palette,
+			&rgba,
+			w as u32,
+			h as u32,
+			&mut err_cur,
+			&mut err_next,
+			&mut dithered,
+		);
+
+		// RMS distance between the ramp and a 16-px moving average of what a row maps to: the
+		// eye averages neighbouring pixels, so this is the banding it sees.
+		let row = h / 2;
+		let banding = |indices: &[u8]| -> f64 {
+			let k = 16;
+			let grey = |x: usize| palette[indices[row * w + x] as usize * 3] as f64;
+			let sq: Vec<f64> = (0..=w - k)
+				.map(|x0| {
+					let seen = (x0..x0 + k).map(grey).sum::<f64>() / k as f64;
+					let truth = (x0..x0 + k).map(|x| ramp(x) as f64).sum::<f64>() / k as f64;
+					(seen - truth).powi(2)
+				})
+				.collect();
+			(sq.iter().sum::<f64>() / sq.len() as f64).sqrt()
+		};
+		let (plain_err, dithered_err) = (banding(&plain), banding(&dithered));
+		assert!(plain_err > 3.0, "this palette should band the ramp (error {plain_err:.2})");
+		assert!(
+			dithered_err < 1.5,
+			"dithering left the ramp banded: {dithered_err:.2} vs {plain_err:.2} undithered"
+		);
+	}
+
+	/// The export dithers unless told not to: without it every gradient wallpaper bands.
+	#[test]
+	fn gif_export_dithers_by_default() {
+		assert!(GifExportParams::default().dither);
 	}
 
 	/// `GifWriter::new` rejects zero dimensions.

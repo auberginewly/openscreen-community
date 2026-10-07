@@ -37,6 +37,15 @@ interface Window {
 		 *  `compositor.export`/`compositor.exportMulti` runs. Distinct from `exportOnFrameAck`,
 		 *  the OLD web/CPU pipeline's per-frame ack, not a progress signal. */
 		onNativeExportProgress?: (callback: (frames: number, exportId?: string) => void) => () => void;
+		/** Preview frames the main process hands over as shared GPU textures (Windows). The
+		 *  listener draws `frame` and closes it; one listener at a time. Returns the
+		 *  unsubscribe. Optional: shim/web contexts have no bridge. */
+		onCompositorFrame?: (
+			listener: (
+				frame: VideoFrame,
+				meta: import("../src/native/contracts").CompositorSharedFrameMeta,
+			) => void,
+		) => () => void;
 		getSources: (opts: Electron.SourcesOptions) => Promise<ProcessedDesktopSource[]>;
 		switchToEditor: () => Promise<void>;
 		switchToHud: () => Promise<void>;
@@ -47,6 +56,8 @@ interface Window {
 		}>;
 		/** Sources are picked in Apple's system picker (macOS 15.2+), not in an app list. */
 		usesSystemSourcePicker?: () => Promise<boolean>;
+		/** Name of the last source picked in Apple's picker, for display only: it is not selected. */
+		getLastPickedSource?: () => Promise<string | null>;
 		openNotes: () => Promise<{
 			opened: boolean;
 			reason?: string;
@@ -70,6 +81,12 @@ interface Window {
 		onAutoStartRecording: (callback: () => void) => () => void;
 		onAiEditionChatEvent: (
 			callback: (event: import("../src/native/contracts").AiEditionChatEvent) => void,
+		) => () => void;
+		/** Optional: absent in the browser shim and in tests that stub electronAPI. */
+		onAiEditionMcpRequest?: (
+			callback: (
+				request: import("../src/native/contracts").AiEditionMcpHostRequest,
+			) => Promise<import("../src/native/contracts").AiEditionMcpHostResponse["result"]>,
 		) => () => void;
 		requestCameraAccess: () => Promise<{
 			success: boolean;
@@ -172,6 +189,7 @@ interface Window {
 		startNativeMacRecording: (
 			request: import("../src/lib/nativeMacRecording").NativeMacRecordingRequest,
 		) => Promise<import("../src/lib/nativeMacRecording").NativeMacRecordingStartResult>;
+		onNativeMacSystemAudioUnavailable: (callback: () => void) => () => void;
 		pauseNativeMacRecording: () => Promise<{
 			success: boolean;
 			error?: string;
@@ -377,6 +395,11 @@ interface Window {
 			message?: string;
 			error?: string;
 		}>;
+		getLoudnessGain: (filePath: string) => Promise<{
+			success: boolean;
+			gainDb: number;
+			message?: string;
+		}>;
 		clearCurrentVideoPath: () => Promise<{ success: boolean }>;
 		saveProjectFile: (
 			projectData: unknown,
@@ -426,6 +449,7 @@ interface Window {
 		quitApp: () => void;
 		setTitleBarOverlay: (color: string, symbolColor: string) => void;
 		getPlatform: () => string;
+		getSystemVersion: () => string;
 		getAppInfo: () => Promise<{ version: string; canCheckForUpdates: boolean }>;
 		checkForUpdates: () => Promise<void>;
 		showAbout: () => Promise<void>;

@@ -5,7 +5,7 @@
 // the saved preference is left untouched on disk and the help popover says so.
 
 import "@testing-library/jest-dom";
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/contexts/I18nContext";
@@ -13,6 +13,15 @@ import { LOCALE_STORAGE_KEY } from "@/i18n/config";
 import { type AxcutDocument, createEmptyDocument } from "@/lib/ai-edition/schema";
 import { useProjectStore } from "@/lib/ai-edition/store/projectStore";
 import { LayoutPane } from "./RightPanes";
+
+const segmentation = vi.hoisted(() => ({ supported: false, segmentCameraFrame: vi.fn() }));
+vi.mock("@/native/hooks/useSegmentationSupport", () => ({
+	useCanSegmentCamera: () => segmentation.supported,
+}));
+vi.mock("@/native/compositorViewClient", async (importOriginal) => ({
+	...(await importOriginal<typeof import("@/native/compositorViewClient")>()),
+	segmentCameraFrame: segmentation.segmentCameraFrame,
+}));
 
 function seedProject(hasCamera: boolean): AxcutDocument {
 	const base = createEmptyDocument({ projectId: "project_layout", title: "Layout" });
@@ -154,6 +163,72 @@ describe("LayoutPane webcam framing picture", () => {
 	});
 });
 
+// The thumbnail shows the camera background the preview draws. The promise that makes it
+// cheap: nothing runs while the background is the camera's own, and the frame is segmented
+// once, every later change of mode, blur or wallpaper being CSS over the same mask.
+describe("LayoutPane webcam framing background", () => {
+	beforeEach(() => {
+		segmentation.supported = true;
+		segmentation.segmentCameraFrame.mockResolvedValue(new Uint8Array(256 * 144).fill(255));
+		// jsdom has no 2D canvas; the thumbnail only draws into one and reads it back.
+		vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+			drawImage: vi.fn(),
+			getImageData: (_x: number, _y: number, w: number, h: number) => ({
+				data: new Uint8ClampedArray(w * h * 4),
+			}),
+			createImageData: (w: number, h: number) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+			putImageData: vi.fn(),
+		} as unknown as CanvasRenderingContext2D);
+		vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue("data:image/png;base64,AA");
+	});
+	afterEach(() => {
+		segmentation.supported = false;
+		segmentation.segmentCameraFrame.mockReset();
+		vi.restoreAllMocks();
+	});
+
+	const withBackground = (webcamBackgroundMode: string) => {
+		const doc = seedProject(true);
+		return { ...doc, legacyEditor: { ...doc.legacyEditor, webcamBackgroundMode } };
+	};
+	/** Loads the thumbnail's frame the way the browser would: metadata, then the seek. */
+	const showFrame = () => {
+		const video = document.querySelector('[class*="framingVideo"]') as HTMLVideoElement;
+		Object.defineProperty(video, "videoWidth", { configurable: true, value: 640 });
+		Object.defineProperty(video, "videoHeight", { configurable: true, value: 480 });
+		fireEvent.loadedMetadata(video);
+		fireEvent.seeked(video);
+		return video;
+	};
+	const backdrop = () =>
+		document.querySelector('[class*="framingBox"] > div[aria-hidden="true"]') as HTMLElement | null;
+
+	it("segments nothing while the camera keeps its own background", () => {
+		renderLayout(withBackground("none"));
+		const video = showFrame();
+
+		expect(segmentation.segmentCameraFrame).not.toHaveBeenCalled();
+		expect(video.style.maskImage).toBe("");
+		expect(backdrop()).toBeNull();
+	});
+
+	it("cuts the subject out once, then restyles the background around it", async () => {
+		renderLayout(withBackground("blur"));
+		const video = showFrame();
+
+		await waitFor(() => expect(video.style.maskImage).toContain("data:image/png"));
+		expect(backdrop()?.style.filter).toMatch(/^blur\(/);
+
+		fireEvent.click(screen.getByRole("button", { name: "Custom" }));
+		expect(backdrop()?.style.filter).toBe("");
+		fireEvent.click(screen.getByRole("button", { name: "Cutout" }));
+		expect(backdrop()).toBeNull();
+		expect(video.style.maskImage).toContain("data:image/png");
+
+		expect(segmentation.segmentCameraFrame).toHaveBeenCalledTimes(1);
+	});
+});
+
 describe("LayoutPane picture-in-picture camera", () => {
 	const stored = () => useProjectStore.getState().document?.legacyEditor as Record<string, unknown>;
 
@@ -162,14 +237,30 @@ describe("LayoutPane picture-in-picture camera", () => {
 		const shapes = within(screen.getByRole("group", { name: "Camera shape" })).getAllByRole(
 			"button",
 		);
-		expect(shapes.map((b) => b.textContent)).toEqual(["Rectangle", "Square"]);
-		fireEvent.click(screen.getByRole("button", { name: "Square" }));
+		expect(shapes.map((b) => b.textContent)).toEqual(["Square", "Original"]);
+		fireEvent.click(within(shapes[1]).getByText("Original"));
+		expect(stored()).toMatchObject({ webcamMaskShape: "rectangle" });
+		fireEvent.click(within(shapes[0]).getByText("Square"));
 		expect(stored()).toMatchObject({ webcamMaskShape: "square" });
 		fireEvent.change(screen.getByRole("slider", { name: "Roundness" }), {
 			target: { value: "100" },
 		});
 		// Each control moves its own axis only: full roundness leaves the shape a square.
 		expect(stored()).toMatchObject({ webcamMaskShape: "square", webcamRoundness: 1 });
+	});
+
+	it("moves an untouched roundness to each shape's own default, and keeps a tuned one", () => {
+		renderLayout(seedProject(true));
+		const shapes = within(screen.getByRole("group", { name: "Camera shape" })).getAllByRole(
+			"button",
+		);
+		const roundness = () => screen.getByRole("slider", { name: "Roundness" });
+		expect(roundness()).toHaveValue("70");
+		fireEvent.click(shapes[1]);
+		expect(stored()).toMatchObject({ webcamMaskShape: "rectangle", webcamRoundness: 0.4 });
+		fireEvent.change(roundness(), { target: { value: "55" } });
+		fireEvent.click(shapes[0]);
+		expect(stored()).toMatchObject({ webcamMaskShape: "square", webcamRoundness: 0.55 });
 	});
 
 	it("places the camera on one of eight anchors, bottom right by default", () => {
@@ -195,9 +286,11 @@ describe("LayoutPane picture-in-picture camera", () => {
 		expect(stored()).toMatchObject({ webcamAnchor: "right" });
 	});
 
-	it("keeps the camera under 35% of the frame", () => {
+	it("offers a camera from 15% to 60% of the frame", () => {
 		renderLayout(seedProject(true));
-		expect(screen.getByRole("slider", { name: "Webcam size" })).toHaveAttribute("max", "35");
+		const slider = screen.getByRole("slider", { name: "Webcam size" });
+		expect(slider).toHaveAttribute("min", "15");
+		expect(slider).toHaveAttribute("max", "60");
 	});
 });
 

@@ -58,6 +58,7 @@ import {
 	getSelectedDesktopSource,
 	registerIpcHandlers,
 } from "./ipc/handlers";
+import { isOnlyLingeringOverlay } from "./lingeringOverlay";
 import { installMainProcessErrorGuards } from "./main-process-errors";
 import { showMessageBoxOver } from "./messageBox";
 import {
@@ -65,6 +66,7 @@ import {
 	showPermissionsWindow,
 	showPermissionsWindowIfNeeded,
 } from "./permissions";
+import { setDisplaySleepBlocked } from "./recording/displaySleepBlocker";
 import { offersStarPrompt, REPO_URL, storeReviewUrl } from "./star-prompt";
 import { registerSttIpc, shutdownStt } from "./stt";
 import { checkLatestRelease } from "./update-checker";
@@ -1088,6 +1090,17 @@ if (!cliCommand) {
 	app.on("window-all-closed", () => {
 		app.quit();
 	});
+	// The countdown overlay hides between takes instead of closing, so it would keep
+	// `window-all-closed` from ever firing (#961). Close it with the last other window. Every
+	// HUD/editor switch opens the next window before the previous one's `closed` arrives, so
+	// this only fires when the user really closed the last one.
+	app.on("browser-window-created", (_, win) => {
+		win.once("closed", () => {
+			if (isOnlyLingeringOverlay(BrowserWindow.getAllWindows(), countdownOverlayWindow)) {
+				countdownOverlayWindow?.close();
+			}
+		});
+	});
 }
 
 app.on("activate", () => {
@@ -1360,7 +1373,7 @@ appReady?.then(async () => {
 		showMainWindow();
 	}
 
-	registerIpcHandlers(
+	const { mcpController } = registerIpcHandlers(
 		createEditorWindowWrapper,
 		createSourceSelectorWindowWrapper,
 		createCountdownOverlayWindowWrapper,
@@ -1372,6 +1385,7 @@ appReady?.then(async () => {
 		(recording: boolean, sourceName: string) => {
 			selectedSourceName = sourceName;
 			isRecording = recording;
+			setDisplaySleepBlocked(recording);
 			if (!tray) createTray();
 			updateTrayMenu(recording);
 			// `canOfferUpdateCheck()` now answers "not mid-take" too, and the app/Help menus are
@@ -1404,6 +1418,9 @@ appReady?.then(async () => {
 	}
 
 	createWindow();
+	// Off unless the user turned it on in Settings → AI. Started here rather than
+	// in registerIpcHandlers so neither the headless CLI nor a bench run binds it.
+	void mcpController.startIfEnabled();
 	void showPermissionsWindowIfNeeded().catch((error) =>
 		console.warn("[permissions] could not read the permissions at launch:", error),
 	);

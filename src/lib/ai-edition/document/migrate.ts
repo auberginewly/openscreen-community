@@ -21,6 +21,7 @@ import type {
 	TrimRegion,
 	ZoomRegion,
 } from "@/components/video-editor/types";
+import { readBackgroundBlur } from "@/lib/projectDefaults";
 import type { ProjectMedia } from "@/lib/recordingSession";
 import {
 	type AxcutAnnotationRegion,
@@ -221,7 +222,9 @@ export function migrateProjectDataToAxcutDocument(
 			...(typeof region.customScale === "number" ? { customScale: region.customScale } : {}),
 			...(region.source === "auto" || region.source === "manual" ? { source: region.source } : {}),
 			...(region.hideCursor ? { hideCursor: true } : {}),
-			...(region.clickImpact === true ? { clickImpact: true as const } : {}),
+			// Up to v1.13.0 a zoom stored its click impact; it is a cursor setting now. Carried on
+			// the draft so `migrateRawDocumentToCurrent` lifts it there, as for a stored document.
+			...("clickImpact" in region && region.clickImpact === true ? { clickImpact: true } : {}),
 		}));
 
 	const migratedAnnotations: AxcutAnnotationRegion[] = annotationRegions
@@ -316,7 +319,7 @@ export function migrateAxcutDocumentToProjectData(input: AxcutDocument): EditorP
 		wallpaper: "",
 		wallpaperMotion: "none",
 		shadowIntensity: 0,
-		showBlur: false,
+		backgroundBlur: 0,
 		motionBlurAmount: 0,
 		depthOfField: true,
 		borderRadius: 0,
@@ -347,6 +350,9 @@ export function migrateAxcutDocumentToProjectData(input: AxcutDocument): EditorP
 	const legacy = document.legacyEditor;
 	if (legacy && typeof legacy === "object") {
 		Object.assign(editor, legacy);
+		// A document from before the amount holds only the `showBlur` switch; the default 0
+		// above would otherwise win over it once the project is read back.
+		editor.backgroundBlur = readBackgroundBlur(legacy, 0);
 	}
 
 	const reverseZoomRegions: ZoomRegion[] = (document.zoomRanges ?? []).map((region) => ({
@@ -360,7 +366,6 @@ export function migrateAxcutDocumentToProjectData(input: AxcutDocument): EditorP
 		...(typeof region.customScale === "number" ? { customScale: region.customScale } : {}),
 		...(region.source ? { source: region.source } : {}),
 		...(region.hideCursor ? { hideCursor: true } : {}),
-		...(region.clickImpact ? { clickImpact: true as const } : {}),
 	}));
 	editor.zoomRegions = reverseZoomRegions;
 

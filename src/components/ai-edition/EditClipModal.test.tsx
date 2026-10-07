@@ -115,20 +115,6 @@ describe("EditClipModal trim duration readout (#558)", () => {
 		expect(screen.getAllByText("0:20.0–1:45.0")).toHaveLength(1);
 	});
 
-	it("keeps the discarded head and tail out of the pointer's way", () => {
-		const { container } = renderModal();
-
-		// The dimmed tail is painted after the selection, so it covers the end
-		// handle's 6px overhang and, once the range is narrower than the handle,
-		// the handle itself. jsdom does not hit-test, so this pins the property
-		// rather than the grab; the grab is checked by driving the real window.
-		const dimmed = [...container.querySelectorAll<HTMLElement>("div")].filter(
-			(el) => el.style.background === "var(--overlay-dark)",
-		);
-		expect(dimmed).toHaveLength(2);
-		for (const el of dimmed) expect(el.style.pointerEvents).toBe("none");
-	});
-
 	it("updates the final duration as the end handle is dragged", () => {
 		renderModal();
 
@@ -141,6 +127,79 @@ describe("EditClipModal trim duration readout (#558)", () => {
 
 		expect(screen.getByTestId("edit-clip-trim-range")).toHaveTextContent("0:20.0–1:40.0");
 		expect(screen.getByTestId("edit-clip-final-duration")).toHaveTextContent("1:20.0");
+	});
+});
+
+describe("EditClipModal in a short window (#1005)", () => {
+	// The actions used to sit at the end of the scrolling body. In a window too short for the
+	// card, Apply was clipped out of view, and a click where it should have been landed on the
+	// backdrop, which closed the dialog and dropped the new trim and crop without a word.
+	function renderWithSpies() {
+		const onClose = vi.fn();
+		const onApply = vi.fn();
+		renderWithI18n(
+			<EditClipModal
+				open
+				onClose={onClose}
+				clip={CLIP}
+				assetMeta={ASSET}
+				videoSources={[]}
+				onApply={onApply}
+			/>,
+		);
+		return { onClose, onApply };
+	}
+
+	function clickBackdrop() {
+		const backdrop = document.querySelector('[class*="modalBackdrop"]');
+		if (!backdrop) throw new Error("no modal backdrop rendered");
+		fireEvent.click(backdrop);
+	}
+
+	it("keeps the actions out of the scrolling body", () => {
+		renderWithSpies();
+		const apply = screen.getByRole("button", { name: "Apply" });
+
+		expect(apply.closest('[class*="modalBody"]')).toBeNull();
+		expect(apply.closest('[class*="modalFoot"]')).not.toBeNull();
+	});
+
+	it("closes on a backdrop click while there is nothing to lose", () => {
+		const { onClose } = renderWithSpies();
+
+		clickBackdrop();
+
+		expect(onClose).toHaveBeenCalledTimes(1);
+	});
+
+	it.each([
+		[
+			"a trim",
+			() => {
+				fireEvent.pointerDown(screen.getByRole("button", { name: "Adjust clip start" }), {
+					clientX: 0,
+				});
+				act(() => {
+					window.dispatchEvent(new MouseEvent("pointermove", { clientX: 100 }));
+					window.dispatchEvent(new MouseEvent("pointerup"));
+				});
+			},
+		],
+		["a crop", () => fireEvent.click(screen.getByRole("button", { name: "1:1" }))],
+	])("keeps %s through a backdrop click, and drops it on Escape or Cancel", (_, edit) => {
+		const { onClose, onApply } = renderWithSpies();
+		edit();
+
+		clickBackdrop();
+		expect(onClose).not.toHaveBeenCalled();
+		expect(screen.getByRole("button", { name: "Apply" })).toBeEnabled();
+
+		// Those two say "discard"; a click beside the card does not.
+		fireEvent.keyDown(document, { key: "Escape" });
+		expect(onClose).toHaveBeenCalledTimes(1);
+		fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+		expect(onClose).toHaveBeenCalledTimes(2);
+		expect(onApply).not.toHaveBeenCalled();
 	});
 });
 

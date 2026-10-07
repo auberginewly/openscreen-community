@@ -410,7 +410,8 @@ describe("the prompt when the user has turned project edits off", () => {
 	});
 
 	it("says nothing of the sort on a normal turn", () => {
-		expect(buildSystemPrompt({ editsAllowed: true })).toBe(SYSTEM_PROMPT);
+		expect(buildSystemPrompt({ editsAllowed: true, reviewEdits: true })).toBe(SYSTEM_PROMPT);
+		expect(SYSTEM_PROMPT).toMatch(/draft until the user reviews and applies/);
 		expect(SYSTEM_PROMPT).not.toMatch(/PROJECT EDITS ARE CURRENTLY DISABLED/);
 	});
 
@@ -423,7 +424,9 @@ describe("the prompt when the user has turned project edits off", () => {
 	it("keeps the normal prompt as a prefix, so the editing rules still apply", () => {
 		// The consent block CONSTRAINS the turn; it does not replace the tool
 		// selection rules the model needs to describe the edit it is proposing.
-		expect(buildSystemPrompt({ editsAllowed: false }).startsWith(SYSTEM_PROMPT)).toBe(true);
+		expect(
+			buildSystemPrompt({ editsAllowed: false, reviewEdits: true }).startsWith(SYSTEM_PROMPT),
+		).toBe(true);
 	});
 });
 

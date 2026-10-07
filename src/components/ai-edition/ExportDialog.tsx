@@ -1,7 +1,7 @@
 // Export dialog for the new editor. Wires together:
 // 1. pickExportSavePath (native save dialog)
 // 2. the native D3D exporter (exportMultiNative / exportGifNative)
-// 3. per-job GIF cancellation, with native cleanup before returning to options
+// 3. per-job cancellation (MP4 and GIF), with native cleanup before returning to options
 //
 // Format/quality/GIF options live in the dialog's local state. The
 // dialog uses the new shell's modal style.
@@ -25,7 +25,6 @@ import {
 	type ExportFormat,
 	type ExportProgress,
 	type ExportQuality,
-	type ExportVideoCodec,
 	GIF_FRAME_RATES,
 	GIF_SIZE_PRESETS,
 	type GifFrameRate,
@@ -34,7 +33,7 @@ import {
 import { calculateMp4ExportSettings, wouldUpscale } from "@/lib/exporter/mp4ExportSettings";
 import { outputFrameCount } from "@/lib/exporter/outputFrameCount";
 import {
-	cancelGifExportNative,
+	cancelExportNative,
 	exportGifNative,
 	exportMultiNative,
 	useIsCpuCompositor,
@@ -44,11 +43,12 @@ import type { CompositorClipInput } from "@/native/contracts";
 import { buildSceneDescription, resolveVisibleClips } from "@/native/sceneDescription";
 import { ModalShell } from "./Modals";
 import styles from "./NewEditorShell.module.css";
+import { Toggle } from "./RightPanes";
 
 type Phase = "idle" | "configuring" | "rendering" | "writing" | "done" | "error";
 
 interface ActiveExport {
-	id?: string;
+	id: string;
 	cancelRequested: boolean;
 	unsubscribe?: () => void;
 }
@@ -56,8 +56,8 @@ interface ActiveExport {
 function disposeExport(exportJob: ActiveExport | null) {
 	exportJob?.unsubscribe?.();
 	if (exportJob?.id) {
-		void cancelGifExportNative(exportJob.id).catch((error) => {
-			console.warn("[export] failed to cancel detached GIF export", error);
+		void cancelExportNative(exportJob.id).catch((error) => {
+			console.warn("[export] failed to cancel detached export", error);
 		});
 	}
 }
@@ -161,7 +161,6 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 	const [format, setFormat] = useState<ExportFormat>("mp4");
 	const [quality, setQuality] = useState<ExportQuality>("good");
 	const [fps, setFps] = useState<24 | 30 | 60>(60);
-	const [codec, setCodec] = useState<ExportVideoCodec>("h264");
 	const [gifFrameRate, setGifFrameRate] = useState<GifFrameRate>(15);
 	const [gifSize, setGifSize] = useState<GifSizePreset>("medium");
 	const [gifLoop, setGifLoop] = useState(true);
@@ -213,8 +212,8 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 	);
 	// (The "largest clip" pick lived here for the old renderer-side GIF path, which
 	// sized to the best available footage independently of the quality tier. GIF now
-	// goes through the same native exporter as MP4 and shares its sizing, so only the
-	// smallest-clip pick below is still needed.)
+	// goes through the same native exporter as MP4 and starts from its "Source" size, so
+	// only the smallest-clip pick below is still needed.)
 
 	// Smallest clip's true (cropped) footprint on the timeline — a multiclip timeline can mix
 	// crops/resolutions, so this is what "Source" quality actually targets: sizing to the
@@ -245,25 +244,6 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 	// quality actually uses these as its target size; 720p/1080p target a fixed short side
 	// regardless (`calculateDimensionsForShortSide`), so this only changes what "Source"
 	// resolves to.
-	// GIF is 8-bit indexed and grows fast with area, so the size preset caps the
-	// output height rather than following the quality tier. `original` keeps the
-	// tier's dims; the native side falls back to its own defaults when undefined.
-	const gifOutputDims = (
-		preset: GifSizePreset,
-		tierDims: { width: number; height: number } | null,
-	): { width?: number; height?: number } => {
-		if (!tierDims) return {};
-		const maxHeight = GIF_SIZE_PRESETS[preset].maxHeight;
-		if (!Number.isFinite(maxHeight) || tierDims.height <= maxHeight) {
-			return { width: tierDims.width, height: tierDims.height };
-		}
-		const scale = maxHeight / tierDims.height;
-		// Even dimensions: the compositor rasterises to this size and the readback
-		// assumes a tightly-packed RGBA buffer.
-		const even = (n: number) => Math.max(2, Math.round(n * scale) & ~1);
-		return { width: even(tierDims.width), height: even(tierDims.height) };
-	};
-
 	const tierOutputDims = (value: ExportQuality) =>
 		smallestSource
 			? calculateMp4ExportSettings({
@@ -271,8 +251,29 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 					sourceWidth: smallestSource.width,
 					sourceHeight: smallestSource.height,
 					aspectRatioValue: EXPORT_ASPECT,
+					frameRate: fps,
 				})
 			: null;
+
+	// GIF is 8-bit indexed and grows fast with area, so the size preset caps the output
+	// height. It starts from the "Source" size, never from the quality tier: that control is
+	// MP4-only and hidden while GIF is picked, yet the tier an MP4 choice left behind used to
+	// size the GIF (a 640x360 clip gave 852x480 after the 1080p tier, 640x360 after Source).
+	// So no preset upscales and `original` is the source size. The native side falls back
+	// to its own defaults when undefined.
+	const gifOutputDims = (preset: GifSizePreset): { width?: number; height?: number } => {
+		const source = tierOutputDims("source");
+		if (!source) return {};
+		const maxHeight = GIF_SIZE_PRESETS[preset].maxHeight;
+		if (source.height <= maxHeight) {
+			return { width: source.width, height: source.height };
+		}
+		const scale = maxHeight / source.height;
+		// Even dimensions: the compositor rasterises to this size and the readback
+		// assumes a tightly-packed RGBA buffer.
+		const even = (n: number) => Math.max(2, Math.round(n * scale) & ~1);
+		return { width: even(source.width), height: even(source.height) };
+	};
 
 	useEffect(() => {
 		if (!open) {
@@ -306,8 +307,14 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 		job.cancelRequested = true;
 		setCancelPending(true);
 		try {
-			await cancelGifExportNative(job.id);
-			// Native settlement decides the winner and confirms file cleanup.
+			const { accepted } = await cancelExportNative(job.id);
+			// Native settlement decides the winner and confirms file cleanup. A refusal means the
+			// export finishes on its own (already publishing, or an addon too old to cancel an
+			// MP4), so the dialog goes back to showing its progress.
+			if (!accepted && activeExport.current === job) {
+				job.cancelRequested = false;
+				setCancelPending(false);
+			}
 		} catch (err) {
 			if (activeExport.current !== job) return;
 			job.cancelRequested = false;
@@ -366,10 +373,7 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 		// as the live preview, so an export can no longer disagree with what the
 		// user previewed.
 		{
-			const job: ActiveExport = {
-				id: format === "gif" ? crypto.randomUUID() : undefined,
-				cancelRequested: false,
-			};
+			const job: ActiveExport = { id: crypto.randomUUID(), cancelRequested: false };
 			activeExport.current = job;
 			setPhase("rendering");
 			// Render the real timeline when there are clips; else fall back to the fixture.
@@ -420,21 +424,29 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 								pickedPath,
 								sceneJson,
 								{
-									// GIF is 256-colour and grows fast; cap the long edge at the
-									// chosen preset rather than exporting at source size.
-									...gifOutputDims(gifSize, outDims),
+									...gifOutputDims(gifSize),
 									fps: gifFrameRate,
 									// 0 = infinite, the historical GIF default; 1 = play once.
 									loopCount: gifLoop ? 0 : 1,
 								},
 								job.id,
 							)
-						: await exportMultiNative(exportClips, pickedPath, sceneJson, {
-								width: outDims?.width,
-								height: outDims?.height,
-								fps,
-								codec,
-							});
+						: await exportMultiNative(
+								exportClips,
+								pickedPath,
+								sceneJson,
+								{
+									width: outDims?.width,
+									height: outDims?.height,
+									fps,
+									// H.264 only. The native pipeline still encodes H.265, but nothing
+									// offers it: it is software-only on Linux, slower than software on the
+									// measured Macs, and the files half the players cannot open.
+									codec: "h264",
+									bitrate: outDims?.bitrate,
+								},
+								job.id,
+							);
 				if (activeExport.current !== job) return;
 				setSavedPath(pickedPath);
 				setPhase("done");
@@ -570,65 +582,20 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 								</button>
 							))}
 						</div>
-						<div
-							style={{
-								display: "grid",
-								gridTemplateColumns: "1fr 1fr",
-								gap: 12,
-								marginTop: 12,
-							}}
-						>
-							<div>
-								<div className={styles.groupLabel}>{t("exportDialog.frameRate")}</div>
-								<div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
-									{([24, 30, 60] as const).map((r) => (
-										<button
-											type="button"
-											key={r}
-											disabled={isBusy}
-											onClick={() => setFps(r)}
-											style={segStyle(fps === r)}
-										>
-											{r}
-										</button>
-									))}
-								</div>
-							</div>
-							<div>
-								<div className={styles.groupLabel}>{t("exportDialog.codec")}</div>
-								<div
-									style={{
-										display: "grid",
-										gridTemplateColumns: "repeat(2, 1fr)",
-										gap: 6,
-									}}
-								>
-									{(
-										[
-											["h264", "H.264"],
-											["h265", "H.265"],
-											// VP9 has no AMF hardware encoder on this GPU — the native pipeline
-											// (the only MP4 export path now) rejects it outright (tested: a
-											// software libvpx-vp9 fallback worked but was too slow to ship).
-											// Hidden here rather than left selectable-then-erroring.
-										] as Array<[ExportVideoCodec, string]>
-									).map(([value, label]) => (
-										<button
-											type="button"
-											key={value}
-											disabled={isBusy}
-											onClick={() => setCodec(value)}
-											style={segStyle(codec === value)}
-											title={
-												value === "h264"
-													? t("exportDialog.codecBestCompatibility")
-													: t("exportDialog.codecMaySupportVary")
-											}
-										>
-											{label}
-										</button>
-									))}
-								</div>
+						<div style={{ marginTop: 12 }}>
+							<div className={styles.groupLabel}>{t("exportDialog.frameRate")}</div>
+							<div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+								{([24, 30, 60] as const).map((r) => (
+									<button
+										type="button"
+										key={r}
+										disabled={isBusy}
+										onClick={() => setFps(r)}
+										style={segStyle(fps === r)}
+									>
+										{r}
+									</button>
+								))}
 							</div>
 						</div>
 					</section>
@@ -652,7 +619,7 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 						</div>
 						<div>
 							<div className={styles.groupLabel}>{t("exportDialog.size")}</div>
-							<div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 6 }}>
+							<div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 6 }}>
 								{(Object.keys(GIF_SIZE_PRESETS) as GifSizePreset[]).map((s) => (
 									<button
 										type="button"
@@ -668,12 +635,11 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 						</div>
 						<div className={styles.paneRow} style={{ margin: 0 }}>
 							<span className={styles.label}>{t("exportDialog.loopGif")}</span>
-							<button
-								type="button"
-								className={`${styles.toggle} ${gifLoop ? styles.isOn : ""}`}
-								aria-pressed={gifLoop}
+							<Toggle
+								checked={gifLoop}
+								ariaLabel={t("exportDialog.loopGif")}
 								disabled={isBusy}
-								onClick={() => setGifLoop((v) => !v)}
+								onChange={setGifLoop}
 							/>
 						</div>
 						<div
@@ -741,7 +707,7 @@ export function ExportDialog({ open, onClose, document }: ExportDialogProps) {
 						type="button"
 						className={`${styles.btn} ${styles.btnSecondary}`}
 						onClick={handleCancel}
-						disabled={isBusy && !(format === "gif" && phase === "rendering" && !cancelPending)}
+						disabled={isBusy && !(phase === "rendering" && !cancelPending)}
 						aria-busy={cancelPending}
 					>
 						{cancelPending && <Loader2 size={14} className="animate-spin" />}
@@ -837,22 +803,11 @@ function ProgressBlock({
 	// rather than in the orphaned `settings.support` block because the main process only bundles
 	// `common` and `dialogs`, and one label split across two namespaces is one label that drifts.
 	const tCommon = useScopedT("common");
-	if (phase === "idle" || phase === "configuring") {
-		return (
-			<div
-				style={{
-					padding: "16px",
-					borderRadius: 12,
-					background: "color-mix(in oklab, var(--fg) 5%, transparent)",
-					color: "var(--muted)",
-					font: "500 13px var(--font-body)",
-					textAlign: "center",
-				}}
-			>
-				{t("exportDialog.pickFormatAndExport")}
-			</div>
-		);
-	}
+	// Nothing to say before an export: the format is the first control on screen and
+	// already picked. The old "Pick a format and press Export to start" plate was written
+	// for the UI that hid the format toggle under Advanced, and stayed up through the save
+	// picker where it was simply false.
+	if (phase === "idle" || phase === "configuring") return null;
 	if (phase === "done") {
 		return (
 			<div

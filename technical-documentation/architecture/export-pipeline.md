@@ -110,6 +110,19 @@ and **one** encoder + muxer pair:
   table, asserted by `outputFrameCount.test.ts` and by
   `speed_segments_match_the_exporter_frame_totals`.
 
+- **Cancel stops between frames, and only a finished file is published.**
+  The dialog's Cancel reaches the same `ExportControl` the GIF export uses
+  ([`export_control.rs`](../../crates/compositor/src/export_control.rs)),
+  which `run_composited_multi_cancellable` checks before every frame. The
+  MP4 is muxed into a staged file beside the destination, named with the
+  destination's extension because ffmpeg picks the container from it, and
+  renamed over the destination only once the trailer is written. A
+  cancelled or failed run deletes the staged file and leaves an existing
+  destination untouched. Guards close the muxer on every exit, which
+  Windows requires: it refuses to delete a file ffmpeg still holds open.
+  Audio jobs already in flight are joined, so a cancel settles once they
+  finish.
+
 - **Imported audio tracks** (voiceover / BGM / SFX, issue #350) are mixed
   on top of the assembled programme by `audio.rs::mix_external_tracks`,
   between `assemble_concatenated_pcm` and `finish_audio`. Each track's
@@ -129,13 +142,19 @@ and **one** encoder + muxer pair:
   drift from the compositor). `ExportDialog`'s `tierOutputDims` feeds the
   crop-aware **smallest** clip on the timeline to
   [`calculateMp4ExportSettings`](../../src/lib/exporter/mp4ExportSettings.ts),
-  which maps quality + source dims + aspect ratio to the encoder
-  width / height / bitrate, and passes `width` / `height` to `exportMulti`.
+  which maps quality + source dims + aspect ratio + frame rate to the encoder
+  width / height / bitrate, and passes all three to `exportMulti`. The bitrate
+  is 0.15 bit per pixel per frame (18.7 Mb/s at 1080p60, 9.3 at 1080p30):
+  before it was passed, every export ran at the pipeline's own 8 Mb/s at
+  1080p, whatever its frame rate.
   Only "Source" quality targets those source dims; 720p / 1080p target a
   fixed short side regardless.
-  **Auto** resolves in that same function: the first clip's cropped screen,
-  laid out with the camera layout at rest (`restingCompositionAspect`), plus
-  an even padding border (`autoFrameAspect`). The preview and the scene pad an
+  **Auto** resolves in that same function: the first clip's cropped screen
+  inside its device frame, laid out with the camera layout at rest
+  (`restingCompositionAspect`), plus an even padding border
+  (`autoFrameAspect`). A device's thickness follows the output's shape, which
+  Auto shapes around the device, so `autoFormatAspect` settles the two in a
+  few passes. The preview and the scene pad an
   Auto frame with the matching border (`paddedContentSize`,
   `compositeLayout.ts`), so the composition fills it with the same margin on
   all four sides. Auto is only offered while every clip has the same ratio,
@@ -147,14 +166,19 @@ and **one** encoder + muxer pair:
 
 ## Output formats and codecs
 
-The native MP4 export takes `width`, `height`, `frameRate`, and `codec` as
-parameters on `exportMulti` and writes H.264 (AMF) by default. The
-user-facing codec choice crosses as the plain `ExportVideoCodec` string
-(`"h264"` / `"h265"` / `"vp9"`) in those params; VP9
+The native MP4 export takes `width`, `height`, `fps`, `codec` and `bitrate` as
+parameters on `exportMulti` and writes H.264 (AMF) by default. The dialog
+always sends `"h264"`: `ExportVideoCodec` still accepts `"h265"`, which the
+pipeline encodes, but nothing offers it any more — H.265 is software-only on
+Linux, slower than software on the measured Macs (see
+[native-compositor.md](native-compositor.md)), and the files are the ones half
+the players cannot open. VP9
 falls back to the same H.264 path on machines without a hardware VP9
 encoder (software VP9 was measured too slow and removed — see
-[native-compositor.md](native-compositor.md#known-gaps)). GIF is a
-separate path through `GifExporter` and does not use the native addon.
+[native-compositor.md](native-compositor.md#known-gaps)). GIF goes through
+the same addon (`exportGif`, `gif_export.rs`): a median-cut palette per frame,
+mapped with Floyd-Steinberg dithering by default so a gradient wallpaper does
+not break into flat bands.
 
 ## Licensing
 

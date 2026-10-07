@@ -6,18 +6,24 @@
 // self-sufficient).
 
 import {
+	AppWindow,
 	AudioLines,
 	Camera,
 	Captions as CaptionsIcon,
-	ChevronDown,
 	FileText,
 	HelpCircle,
 	ImagePlus,
+	Laptop,
 	Loader2,
+	type LucideIcon,
 	Mic,
+	Monitor,
 	MousePointerClick,
 	Music,
+	RotateCcw,
 	Sliders,
+	Smartphone,
+	SquareDashed,
 	Trash2,
 	Undo2,
 	Video,
@@ -35,39 +41,44 @@ import {
 	type PointerEvent as ReactPointerEvent,
 	useCallback,
 	useEffect,
+	useId,
 	useLayoutEffect,
 	useMemo,
 	useRef,
 	useState,
 } from "react";
 import { toast } from "sonner";
-import defaultCursorPreviewUrl from "@/assets/cursors/Cursor=Default.svg";
-import GradientEditor, { type GradientEditorState } from "@/components/ui/gradient-editor";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tooltip, TooltipProvider } from "@/components/ui/tooltip";
 import { toFileUrl } from "@/components/video-editor/projectPersistence";
-import { WALLPAPER_MOTIONS, type WallpaperMotion } from "@/components/video-editor/types";
+import {
+	WALLPAPER_MOTIONS,
+	type WallpaperMotion,
+	type WebcamBackgroundMode,
+} from "@/components/video-editor/types";
 import { useI18n, useScopedT } from "@/contexts/I18nContext";
 import { resolveCaptionLane } from "@/lib/ai-edition/captions/settings";
 import { collapseTracksToPills, trackGroupId } from "@/lib/ai-edition/document/audioTracks";
 import {
 	collectNativeFormats,
+	formatFillAvailability,
 	isAutoFormatAvailable,
 	pickOutputDims,
 } from "@/lib/ai-edition/document/outputFormat";
 import type { InsertSide } from "@/lib/ai-edition/document/transcript";
-import type {
-	AxcutAsset,
-	AxcutAudioTrack,
-	AxcutClip,
-	AxcutTranscript,
-	AxcutTrimRange,
-	AxcutWord,
+import {
+	type AxcutAsset,
+	type AxcutAudioTrack,
+	type AxcutClip,
+	type AxcutTranscript,
+	type AxcutTrimRange,
+	type AxcutWord,
+	audioTrackDefaults,
 } from "@/lib/ai-edition/schema";
 import {
 	AUDIO_GAIN_DB_LIMIT,
 	AUDIO_TRACK_GAIN_DB_MAX,
 	AUDIO_TRACK_GAIN_DB_MIN,
-	type EditorSettingsPatch,
+	DEFAULT_EDITOR_SETTINGS,
 } from "@/lib/ai-edition/store/editorSettings";
 import { useProjectStore } from "@/lib/ai-edition/store/projectStore";
 import { useCaptions } from "@/lib/ai-edition/store/useCaptions";
@@ -87,25 +98,33 @@ import {
 	voiceoverPlacements,
 } from "@/lib/ai-edition/timeline/aggregated-transcript";
 import { assetCameraSource, hasAnyClipWithCamera } from "@/lib/ai-edition/timeline/camera";
+import { breatheCut } from "@/lib/ai-edition/timeline/cut-breath";
 import { formatMs } from "@/lib/ai-edition/timeline/format";
 import { removedRawSpans } from "@/lib/ai-edition/timeline/programme-time";
-import type {
-	AssetTranscriptionView,
-	TranscriptGateReason,
+import {
+	type AssetTranscriptionView,
+	type TranscriptGateReason,
 } from "@/lib/ai-edition/transcription/status";
 import { getAssetPath } from "@/lib/assetPath";
 import { resolveWebcamLayoutPreset, supportsWebcamReactiveZoom } from "@/lib/compositeLayout";
 import {
+	CURSOR_KIND_IDS,
+	CURSOR_KINDS,
 	CURSOR_THEMES,
+	type CursorKind,
+	DEFAULT_CURSOR_SPRITES,
 	DEFAULT_CURSOR_THEME_ID,
+	resolveCursorSprites,
 	themePickerPreviewAssets,
 } from "@/lib/cursor/cursorThemes";
-import { buildGradientFromEditor } from "@/lib/gradientBuilder";
+import { gradientSeedColor, oneColorGradient } from "@/lib/gradientBuilder";
 import {
+	DEFAULT_WEBCAM_ROUNDNESS,
 	FRAME_THEMES,
 	type FrameTheme,
 	RECORDING_FRAMES,
 	type RecordingFrame,
+	SETTING_BOUNDS,
 	WEBCAM_ANCHOR_GRID,
 	WEBCAM_SIZE_MAX,
 	WEBCAM_SIZE_MIN,
@@ -118,19 +137,23 @@ import {
 	resolveImageWallpaperUrl,
 	WALLPAPER_PATHS,
 	WALLPAPER_THUMB_PATHS,
+	wallpaperStyle,
 } from "@/lib/wallpaper";
 import { isNativeCompositorActive, setNativeParam } from "@/native";
+import {
+	SEGMENTATION_HEIGHT,
+	SEGMENTATION_WIDTH,
+	segmentCameraFrame,
+} from "@/native/compositorViewClient";
 import { ROUNDNESS_SLIDER_MAX_PX } from "@/native/paramUnits";
 import { wallpaperAcceptsMotion } from "@/native/sceneDescription";
-import {
-	ASPECT_RATIO_PRESETS,
-	type AspectRatio,
-	getAspectRatioLabel,
-} from "@/utils/aspectRatioUtils";
+import { ASPECT_RATIO_PRESETS, type AspectRatio } from "@/utils/aspectRatioUtils";
 import { useCanSegmentCamera } from "../../native/hooks/useSegmentationSupport";
 import { CaptionsPane } from "./CaptionsPane";
+import { ColorField } from "./ColorField";
 import { insertionsEnabled } from "./insertionsEnabled";
 import styles from "./NewEditorShell.module.css";
+import { useRecordedCursorTypes } from "./recordedCursorTypes";
 import { useTranscriptionLabel } from "./TranscriptionStatus";
 import { transcriptionBusyLabel } from "./transcriptionBusyLabel";
 
@@ -380,8 +403,9 @@ function BackgroundSection() {
 				onPickFile={handlePickFile}
 			/>
 			{fileInput}
-			{/* Only a gradient can move, so the row comes with one instead of sitting greyed out
-			    under a photo. The stored choice is kept and comes back with the next gradient. */}
+			{/* Only a gradient or an image can move, so the row comes with one instead of sitting
+			    greyed out under a solid colour. The stored choice is kept and comes back with the
+			    next wallpaper that moves. */}
 			{wallpaperAcceptsMotion(settings.wallpaper) ? (
 				<div className={`${styles.field} ${styles.fieldStack}`}>
 					<span className={styles.fieldLabel}>{ts("background.motion")}</span>
@@ -400,17 +424,22 @@ function BackgroundSection() {
 			{/* Reads in the order it acts: pick a background, then blur it. Lived under
 			    "Effects" while that was a separate facet, which is how a control named
 			    "Blur BG" ended up in the tab that doesn't say background. */}
-			<div className={styles.paneRow}>
-				<span className={styles.label}>{ts("effects.blurBg")}</span>
-				<Toggle
-					checked={settings.showBlur}
+			<div className={styles.sliderGrid}>
+				<SliderCell
+					label={ts("effects.blurBg")}
+					value={settings.backgroundBlur * 100}
+					min={0}
+					max={100}
+					defaultValue={DEFAULT_EDITOR_SETTINGS.backgroundBlur * 100}
+					suffix="%"
 					disabled={!hasDocument}
 					onChange={(v) => {
-						void set({ showBlur: v });
+						setLive({ backgroundBlur: v / 100 });
 						if (isNativeCompositorActive()) {
-							setNativeParam("backgroundBlur", v);
+							setNativeParam("backgroundBlur", v / 100);
 						}
 					}}
+					onCommit={() => void commit()}
 				/>
 			</div>
 		</>
@@ -434,12 +463,49 @@ function useMemoCustomWallpapers(current: string): string[] {
 	return cached;
 }
 
-function normaliseHex(raw: string): string | null {
-	const trimmed = raw.trim();
-	if (!trimmed) return null;
-	const withHash = trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
-	if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(withHash)) return null;
-	return withHash.toLowerCase();
+/** The seed the one-colour gradient starts from when the wallpaper is not one of its own. */
+const GRADIENT_SEED_FALLBACK = "#3b82f6";
+const FULL_HEX = /^#[0-9a-f]{6}$/i;
+
+/**
+ * The free choice, folded behind the curated set: a "Custom" row under the swatches whose
+ * picker holds the wheel, the hex value and the shared presets, like every other colour in
+ * the inspector. Reachable in one click, never the first thing offered.
+ */
+function CustomBackgroundRow({
+	label,
+	value,
+	swatch,
+	hasDocument,
+	onChange,
+	onCommit,
+}: {
+	label: string;
+	value: string;
+	swatch?: string;
+	hasDocument: boolean;
+	onChange: (hex: string) => void;
+	onCommit: () => void;
+}) {
+	const ts = useScopedT("settings");
+	return (
+		<div className={styles.paneRow}>
+			<span className={styles.label}>{ts("background.custom")}</span>
+			<ColorField
+				label={label}
+				value={value}
+				swatch={swatch}
+				disabled={!hasDocument}
+				// Only a complete #rrggbb goes out. ColorField also emits "#abc" while the hex is
+				// being typed; forwarding it wrote a value that came back normalised and replaced
+				// the draft under the user's fingers.
+				onChange={(hex) => {
+					if (FULL_HEX.test(hex)) onChange(hex.toLowerCase());
+				}}
+				onCommit={onCommit}
+			/>
+		</div>
+	);
 }
 
 function BackgroundColorTab({
@@ -447,28 +513,25 @@ function BackgroundColorTab({
 	hasDocument,
 	isSelected,
 	onPick,
+	onLive,
+	onCommit,
 	updateNative = true,
 }: {
 	value: string;
 	hasDocument: boolean;
 	isSelected: (v: string) => boolean;
 	onPick: (next: string) => void;
+	onLive: (next: string) => void;
+	onCommit: () => void;
 	updateNative?: boolean;
 }) {
 	const ts = useScopedT("settings");
-	const [hexDraft, setHexDraft] = useState(value.startsWith("#") ? value : "#000000");
-	useEffect(() => {
-		if (value.startsWith("#")) setHexDraft(value);
-	}, [value]);
-	const commitHex = () => {
-		const next = normaliseHex(hexDraft);
-		if (next) {
-			onPick(next);
-			if (updateNative && isNativeCompositorActive()) {
-				setNativeParam("backgroundColor", next);
-			}
+	const pushNative = (color: string) => {
+		if (updateNative && isNativeCompositorActive()) {
+			setNativeParam("backgroundColor", color);
 		}
 	};
+	const current = /^#[0-9a-f]{6}$/i.test(value) ? value : "#000000";
 	return (
 		<>
 			<div className={styles.bgGrid} style={{ margin: "0 var(--sp-4) 12px" }}>
@@ -482,43 +545,21 @@ function BackgroundColorTab({
 						disabled={!hasDocument}
 						onClick={() => {
 							onPick(c);
-							if (updateNative && isNativeCompositorActive()) {
-								setNativeParam("backgroundColor", c);
-							}
+							pushNative(c);
 						}}
 					/>
 				))}
 			</div>
-			<div
-				style={{
-					margin: "0 var(--sp-4) 12px",
-					display: "flex",
-					alignItems: "center",
-					gap: 8,
+			<CustomBackgroundRow
+				label={ts("background.customColor")}
+				value={current}
+				hasDocument={hasDocument}
+				onChange={onLive}
+				onCommit={() => {
+					onCommit();
+					if (value.startsWith("#")) pushNative(value);
 				}}
-			>
-				<input
-					type="color"
-					className={styles.bgColorInput}
-					value={hexDraft}
-					disabled={!hasDocument}
-					onChange={(e) => setHexDraft(e.target.value)}
-					onBlur={commitHex}
-				/>
-				{/* Mono stays: a hex code. */}
-				<input
-					type="text"
-					className={styles.control}
-					value={hexDraft}
-					disabled={!hasDocument}
-					onChange={(e) => setHexDraft(e.target.value)}
-					onBlur={commitHex}
-					onKeyDown={(e) => {
-						if (e.key === "Enter") commitHex();
-					}}
-					style={{ flex: 1, minWidth: 0, fontFamily: "var(--font-mono)" }}
-				/>
-			</div>
+			/>
 		</>
 	);
 }
@@ -550,35 +591,18 @@ export function WallpaperPicker({
 	const [tab, setTab] = useState<"image" | "color" | "gradient">(
 		() => classifyWallpaper(value).kind,
 	);
-	// The editor is a colour wheel and two stops, taller than the rest of the tab together:
-	// shown on demand, so the presets stay in view.
-	const [gradientEditorOpen, setGradientEditorOpen] = useState(false);
+	// A drag in the colour wheel previews live; the write happens when the picker closes.
+	const live = onLiveChange ?? onChange;
+	const commit = () => void onCommit?.();
 	const customUrls = useMemoCustomWallpapers(value);
-
-	const gradientCommitTimer = useRef<number | null>(null);
-	const handleGradientChange = useCallback(
-		(state: GradientEditorState) => {
-			const grad = buildGradientFromEditor(state);
-			if (onLiveChange) onLiveChange(grad);
-			else onChange(grad);
-			if (gradientCommitTimer.current !== null) {
-				window.clearTimeout(gradientCommitTimer.current);
-			}
-			gradientCommitTimer.current = window.setTimeout(() => {
-				gradientCommitTimer.current = null;
-				if (onCommit) void onCommit();
-			}, 400);
-		},
-		[onChange, onLiveChange, onCommit],
-	);
-	useEffect(
-		() => () => {
-			if (gradientCommitTimer.current !== null) {
-				window.clearTimeout(gradientCommitTimer.current);
-			}
-		},
-		[],
-	);
+	// The colour the user picked, kept as picked: the gradient's first stop is that colour held
+	// inside 35–85% lightness, so reading it back would move a dark pick under the user. It only
+	// stands while the wallpaper is still the gradient it made; a preset or undo replaces it.
+	const [picked, setPicked] = useState<string | null>(null);
+	const seed =
+		picked && oneColorGradient(picked) === value
+			? picked
+			: (gradientSeedColor(value) ?? GRADIENT_SEED_FALLBACK);
 
 	const isSelected = (candidate: string) => value === candidate;
 	const tabs = [
@@ -651,6 +675,8 @@ export function WallpaperPicker({
 					hasDocument={hasDocument}
 					isSelected={isSelected}
 					onPick={(color) => onChange(color)}
+					onLive={live}
+					onCommit={commit}
 					updateNative={updateNativeBackground}
 				/>
 			) : (
@@ -668,20 +694,17 @@ export function WallpaperPicker({
 							/>
 						))}
 					</div>
-					{hasDocument ? (
-						<>
-							<button
-								type="button"
-								className={styles.bgDisclosure}
-								aria-expanded={gradientEditorOpen}
-								onClick={() => setGradientEditorOpen((open) => !open)}
-							>
-								{ts("background.custom")}
-								<ChevronDown size={14} />
-							</button>
-							{gradientEditorOpen ? <GradientEditor onChange={handleGradientChange} /> : null}
-						</>
-					) : null}
+					<CustomBackgroundRow
+						label={ts("background.customGradient")}
+						value={seed}
+						swatch={oneColorGradient(seed)}
+						hasDocument={hasDocument}
+						onChange={(hex) => {
+							setPicked(hex);
+							live(oneColorGradient(hex));
+						}}
+						onCommit={commit}
+					/>
 				</>
 			)}
 		</>
@@ -767,42 +790,17 @@ function TranscriptLaneSwitch({
 }
 
 /**
- * Caption settings, reached from the transcript tab (issue #560).
- *
- * The pane is reused VERBATIM rather than rebuilt into a popover body: it is ~600
- * lines of settings that already work, and "make it a popover" is a question about
- * where it is mounted, not about what it contains. Rebuilding it would have been the
- * one reliable way to arrive at a popover that is not at parity with the tab it
- * replaces.
- *
- * Safe inside a Popover specifically because nothing in it takes focus away — no file
- * input, no OS dialog. That is the trap `useWallpaperFileInput` documents above, and
- * it is worth re-checking if a picker is ever added to captions.
+ * Caption settings, reached from the transcript tab (issue #560). Opening them swaps
+ * the transcript pane for `CaptionsPane` in the same inspector card, so the settings
+ * take the transcript's place and size instead of floating beside it.
  */
-function CaptionSettingsButton() {
+function CaptionSettingsButton({ onOpen }: { onOpen: () => void }) {
 	const ts = useScopedT("settings");
-	const [open, setOpen] = useState(false);
 	return (
-		<Popover open={open} onOpenChange={setOpen}>
-			<PopoverTrigger asChild>
-				<button type="button" className={styles.paneHeadBtn} aria-expanded={open}>
-					<CaptionsIcon size={14} />
-					{ts("facets.captions")}
-				</button>
-			</PopoverTrigger>
-			<PopoverContent
-				align="end"
-				side="bottom"
-				sideOffset={8}
-				collisionPadding={16}
-				animated={false}
-				className="w-auto border-0 bg-transparent p-0 shadow-none z-50"
-			>
-				<div className={styles.captionsPopover}>
-					<CaptionsPane onClose={() => setOpen(false)} />
-				</div>
-			</PopoverContent>
-		</Popover>
+		<button type="button" className={styles.paneHeadBtn} onClick={onOpen}>
+			<CaptionsIcon size={14} />
+			{ts("facets.captions")}
+		</button>
 	);
 }
 
@@ -927,6 +925,7 @@ export function TranscriptPane({
 	// engine, nothing attempted) leaves the button worth pressing.
 	const silentMedia = blocked?.reason === "no-audio";
 	const transcriptionLabel = useTranscriptionLabel();
+	const [captionsOpen, setCaptionsOpen] = useState(false);
 	const paneBusyLabel = transcriptionBusyLabel(
 		busyView ??
 			(isTranscribing ? { assetId: "", status: "running", phase: "loading-model" } : undefined),
@@ -940,13 +939,15 @@ export function TranscriptPane({
 		insertionsEnabled() ? "transcript.editingHintDev" : "transcript.editingHint",
 	);
 
+	if (captionsOpen) return <CaptionsPane onClose={() => setCaptionsOpen(false)} />;
+
 	if (placements.length === 0 || !hasAnyTranscript) {
 		return (
 			<Pane
 				title={ts("transcript.title")}
 				icon={<FileText size={16} />}
 				helpText={helpText}
-				actions={<CaptionSettingsButton />}
+				actions={<CaptionSettingsButton onOpen={() => setCaptionsOpen(true)} />}
 			>
 				{laneSwitch}
 				<div
@@ -997,7 +998,7 @@ export function TranscriptPane({
 			title={ts("transcript.title")}
 			icon={<FileText size={16} />}
 			helpText={helpText}
-			actions={<CaptionSettingsButton />}
+			actions={<CaptionSettingsButton onOpen={() => setCaptionsOpen(true)} />}
 		>
 			{laneSwitch}
 			{/* The gestures are invisible until tried: nothing on a plain word stream says
@@ -1170,12 +1171,19 @@ const TranscriptClipBlock = memo(function TranscriptClipBlock({
 			pendingCaretWordIdRef.current = keptRange[0].id;
 			const startSec = Math.min(...keptRange.map((w) => w.word.startSec));
 			const endSec = Math.max(...keptRange.map((w) => w.word.endSec));
+			// Breath next to the speech that stays, so a cut silence does not glue two words.
+			const breathed = breatheCut(
+				{ startSec, endSec },
+				words
+					.filter((cw) => !isSilenceWord(cw.word) && !isInsertedWord(cw.word))
+					.map((cw) => ({ startSec: cw.word.startSec, endSec: cw.word.endSec, kept: cw.kept })),
+			);
 			onTrimTimelineSpan(
-				...toRawSpan(startSec, endSec),
+				...toRawSpan(breathed.startSec, breathed.endSec),
 				`Skip ${formatMs(startSec * 1000)}-${formatMs(endSec * 1000)} from ${clip.assetId}.`,
 			);
 		},
-		[busy, clip.assetId, toRawSpan, onTrimTimelineSpan, onRemoveWords],
+		[busy, clip.assetId, words, toRawSpan, onTrimTimelineSpan, onRemoveWords],
 	);
 
 	const removeTrimRun = useCallback(
@@ -1301,8 +1309,14 @@ const TranscriptClipBlock = memo(function TranscriptClipBlock({
 			// their own typing bubbles here natively — React's `stopPropagation` only ever
 			// stopped the synthetic tree. Their text is theirs.
 			if (event.target instanceof HTMLInputElement) return;
+			// Default-deny: the block is contentEditable only to carry a caret, so no native
+			// edit may land in it. Not only the two families handled below: Ctrl/Cmd+B, I and U
+			// reach here as `formatBold`, `formatItalic` and `formatUnderline`, and let through
+			// they styled the DOM behind `words`' back (#1038). Undo loses nothing: Ctrl/Cmd+Z
+			// goes to the document undo (keydown, or the Edit menu on macOS), never to the
+			// browser's text history, which has nothing of this block's edits in it anyway.
+			event.preventDefault();
 			if (event.inputType.startsWith("delete")) {
-				event.preventDefault();
 				cutNativeSelection(event.inputType === "deleteContentForward" ? "forward" : "backward");
 				return;
 			}
@@ -1311,10 +1325,7 @@ const TranscriptClipBlock = memo(function TranscriptClipBlock({
 			// instead is a field beside the word the caret was on, whose commit creates a real
 			// word to hold them. So the gesture is the document one — put the caret somewhere
 			// and type — without the DOM ever getting ahead of `words`.
-			if (event.inputType.startsWith("insert")) {
-				event.preventDefault();
-				openInsertion(event.data ?? "");
-			}
+			if (event.inputType.startsWith("insert")) openInsertion(event.data ?? "");
 		};
 		editor.addEventListener("beforeinput", onBeforeInput);
 		return () => editor.removeEventListener("beforeinput", onBeforeInput);
@@ -1466,6 +1477,9 @@ const TranscriptClipBlock = memo(function TranscriptClipBlock({
 					role="textbox"
 					tabIndex={0}
 					contentEditable={!busy}
+					// Ctrl/Cmd+Z here undoes the document: the browser's text history never sees
+					// a transcript edit (see `undo.ts`).
+					data-document-undo="true"
 					aria-busy={busy}
 					aria-readonly={busy}
 					suppressContentEditableWarning
@@ -1763,7 +1777,11 @@ const TranscriptWord = memo(function TranscriptWord({
 				data-end-sec={cw.word.endSec}
 				data-inserted="true"
 				data-skip-id={cw.trimIds[0] ?? undefined}
-				style={{ display: "inline", opacity: removed ? 0.6 : 1 }}
+				style={{
+					display: "inline",
+					position: hover ? "relative" : undefined,
+					opacity: removed ? 0.6 : 1,
+				}}
 				onMouseEnter={() => setHover(true)}
 				onMouseLeave={() => setHover(false)}
 				onDoubleClick={(e) => {
@@ -1813,7 +1831,7 @@ const TranscriptWord = memo(function TranscriptWord({
 				data-start-sec={cw.word.startSec}
 				data-end-sec={cw.word.endSec}
 				data-blanked="true"
-				style={{ display: "inline" }}
+				style={{ display: "inline", position: hover ? "relative" : undefined }}
 				onMouseEnter={() => setHover(true)}
 				onMouseLeave={() => setHover(false)}
 				onDoubleClick={(e) => {
@@ -1858,6 +1876,9 @@ const TranscriptWord = memo(function TranscriptWord({
 			title={corrected ? ts("transcript.correctedWord", { original }) : undefined}
 			style={{
 				display: "inline",
+				// Anchors the hover chip (`WordChipButton`). Only while hovered: a long transcript
+				// would otherwise be thousands of positioned spans.
+				position: hover ? "relative" : undefined,
 				// A cut word stays the loudest thing about itself: when a word is both cut and
 				// corrected, the strike-through wins and the correction mark steps aside.
 				color: removed ? "var(--danger)" : corrected ? "var(--accent)" : "var(--fg)",
@@ -1886,13 +1907,10 @@ const TranscriptWord = memo(function TranscriptWord({
 			    filler_or_hesitation reason when generating suggestions). */}
 			{cw.word.text}{" "}
 			{removed && hover && cw.trimIds.length > 0 ? (
-				<button
-					type="button"
-					contentEditable={false}
-					title={ts("transcript.restoreWord", { word: cw.word.text })}
-					aria-label={ts("transcript.restoreWord", { word: cw.word.text })}
-					onClick={(e) => {
-						e.stopPropagation();
+				<WordChipButton
+					label={ts("transcript.restoreWord", { word: cw.word.text })}
+					tone="var(--danger)"
+					onPress={() =>
 						// build a minimal TrimRun stub — only the ids are
 						// read by onRestore.
 						onRestore({
@@ -1901,26 +1919,11 @@ const TranscriptWord = memo(function TranscriptWord({
 							startWordIndex: 0,
 							endWordIndex: 0,
 							durationSec: 0,
-						});
-					}}
-					style={{
-						display: "inline-flex",
-						alignItems: "center",
-						justifyContent: "center",
-						width: 18,
-						height: 18,
-						marginLeft: 4,
-						padding: 0,
-						border: 0,
-						borderRadius: 4,
-						background: "var(--danger)",
-						color: "white",
-						cursor: "pointer",
-						verticalAlign: "middle",
-					}}
+						})
+					}
 				>
 					<Trash2 size={12} strokeWidth={1.9} aria-hidden="true" />
-				</button>
+				</WordChipButton>
 			) : null}
 			{/* A cut word's bin already restores it — showing the revert beside it would put
 			    two undos for two different things one pixel apart. */}
@@ -1944,7 +1947,14 @@ function RevertWordButton({ label, onRevert }: { label: string; onRevert: () => 
 
 /** The one hover control shape the word stream uses, in whichever colour says what it does.
  *  `contentEditable={false}` keeps it out of the enclosing editable block, and the click is
- *  stopped so it never reaches the seek handler underneath. */
+ *  stopped so it never reaches the seek handler underneath.
+ *
+ *  Laid over the stream, just past the word, rather than in it (#1012). In the flow it
+ *  reflowed the paragraph on every hover, and after a word ending its line it wrapped to
+ *  the start of the next one: reaching it meant leaving the word, which took it away. So
+ *  the host word must be `position: relative` while it shows one. The gap before the chip
+ *  is the button's own padding, not a margin: a margin is a strip that belongs to neither,
+ *  and crossing it un-hovers the word. */
 function WordChipButton({
 	label,
 	tone,
@@ -1967,22 +1977,31 @@ function WordChipButton({
 				onPress();
 			}}
 			style={{
-				display: "inline-flex",
-				alignItems: "center",
-				justifyContent: "center",
-				width: 18,
-				height: 18,
-				marginLeft: 4,
-				padding: 0,
+				position: "absolute",
+				left: "100%",
+				top: "50%",
+				transform: "translateY(-50%)",
+				display: "flex",
+				padding: "0 0 0 4px",
 				border: 0,
-				borderRadius: 4,
-				background: tone,
-				color: "white",
+				background: "transparent",
 				cursor: "pointer",
-				verticalAlign: "middle",
 			}}
 		>
-			{children}
+			<span
+				style={{
+					display: "inline-flex",
+					alignItems: "center",
+					justifyContent: "center",
+					width: 18,
+					height: 18,
+					borderRadius: 4,
+					background: tone,
+					color: "white",
+				}}
+			>
+				{children}
+			</span>
 		</button>
 	);
 }
@@ -2269,20 +2288,6 @@ function restoreCaretBeforeWord(editor: HTMLElement | null, wordId: string): voi
 // pulling the schema into the helpers block.
 export type { AxcutWord };
 
-// ─── Fit a clip ────────────────────────────────────────────────────
-
-/**
- * The patch behind the action.
- *
- * There is no inverse. It was a toggle once, and the OFF branch restored the shipped defaults
- * — which was already a guess dressed as a memory, since nothing stored what the user had
- * before. Undo does that job properly, and the three sliders it writes sit directly below the
- * button, so "put it back" was never missing; it was being modelled twice.
- */
-export function fitClipPatch(nativeToken: AspectRatio): EditorSettingsPatch {
-	return { padding: 0, borderRadius: 0, shadowIntensity: 0, aspectRatio: nativeToken };
-}
-
 /**
  * The catalog key for a count, by CLDR plural category.
  *
@@ -2315,6 +2320,15 @@ const RECORDING_FRAME_LABEL_KEYS: Record<RecordingFrame, string> = {
 	monitor: "effects.frameScreen",
 };
 
+// "None" is dashed like the camera's "no background": the outline of something not drawn.
+const RECORDING_FRAME_ICONS: Record<RecordingFrame, LucideIcon> = {
+	none: SquareDashed,
+	window: AppWindow,
+	laptop: Laptop,
+	phone: Smartphone,
+	monitor: Monitor,
+};
+
 const FRAME_THEME_LABEL_KEYS: Record<FrameTheme, string> = {
 	light: "effects.frameThemeLight",
 	dark: "effects.frameThemeDark",
@@ -2338,9 +2352,7 @@ export function VideoEffectsPane() {
 	const { settings, set, setLive, commit, hasDocument } = useEditorSettings();
 	const document = useProjectStore((s) => s.document);
 
-	// Same source the ratio picker reads, so "fill frame" and the ORIGINAL section of that menu
-	// can never disagree about what shape the footage is. Already sorted by clip count then by
-	// pixel area, so [0] is "the shape most of this timeline is in" with no heuristic of ours.
+	// The footage's own shapes for the Original row, the one most clips are in first.
 	const nativeFormats = useMemo(() => (document ? collectNativeFormats(document) : []), [document]);
 	// What Auto resolves to right now, shown on its row: the one entry whose shape moves with
 	// the project (padding, camera layout, crop) has to say where it currently stands.
@@ -2352,11 +2364,27 @@ export function VideoEffectsPane() {
 		() => (document ? isAutoFormatAvailable(document) : true),
 		[document],
 	);
+	// What Auto stands at, or why it cannot: shown beside the label while Auto is the format.
+	const autoState = !autoAvailable
+		? ts("effects.formatAutoMixed")
+		: autoDims
+			? `${autoDims.width}×${autoDims.height}`
+			: null;
+	const autoStateId = useId();
 	const hasTiltedZoom = (document?.zoomRanges ?? []).some((z) => z.rotationPreset != null);
-	const [fitMenuOpen, setFitMenuOpen] = useState(false);
-	const [ratioMenuOpen, setRatioMenuOpen] = useState(false);
-	const [frameMenuOpen, setFrameMenuOpen] = useState(false);
-	const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+	const fillAvailability = useMemo(
+		() => (document ? formatFillAvailability(document) : "none"),
+		[document],
+	);
+	const fillActive = settings.formatFollowCursor === true && fillAvailability === "available";
+	// Filling is the default for a format picked from now on; a project that already had one
+	// keeps showing its recording whole until the user says otherwise.
+	const fillDefault = settings.formatFollowCursor === null ? { formatFollowCursor: true } : {};
+	// The padding a drag started from, held until its release: the Roundness row follows it and
+	// not the live value. Added or dropped mid-drag, the row reflowed the pane under the pointer
+	// dragging the slider: a clamped scroll on the way to 0, a scrollbar appearing on the way
+	// out of it.
+	const [scrubStartPadding, setScrubStartPadding] = useState<number | null>(null);
 	const { locale } = useI18n();
 	const clipCountLabel = (count: number) => ts(pluralKey(locale, count), { count });
 
@@ -2372,16 +2400,6 @@ export function VideoEffectsPane() {
 	// un effet de montage ici ne poussait rien tant que ce panneau precis n'avait pas
 	// ete ouvert. Les handlers par controle ci-dessous poussent toujours leurs diffs.
 
-	const applyFitClip = (token: AspectRatio) => {
-		const patch = fitClipPatch(token);
-		void set(patch);
-		if (isNativeCompositorActive()) {
-			setNativeParam("padding", 0);
-			setNativeParam("roundness", 0);
-			setNativeParam("shadow", 0);
-		}
-	};
-
 	return (
 		<Pane
 			title={ts("effects.title")}
@@ -2392,339 +2410,206 @@ export function VideoEffectsPane() {
 			helpText={`${ts("background.help")} ${ts("effects.help")}`}
 		>
 			<BackgroundSection />
-			<div className={styles.sectionHead}>
-				<span className={styles.sectionLabel}>{ts("effects.frame")}</span>
-				{/* #84: "how do I turn the background off". The honest answer was four settings
-				    in three places, so nobody found it. This is that answer as one control.
-
-				    An ACTION, not a state, and not one setting among the four below either — it
-				    overwrites all of them at once, which is why it rides the section header
-				    instead of joining the list. The nearest thing it has to a peer is a reset
-				    button, except it resets to a TARGET state rather than to the initial one.
-
-				    It was a switch first, and a switch has room for one outcome while a timeline
-				    with several shapes has one per shape — so it took the majority silently.
-				    Making the choice explicit as a row of chips then failed on its own terms:
-				    the chips read `683:384` and `64:27`, and ten of them do not fit. So: a
-				    button that does the thing, and a list to pick from when there is more than
-				    one thing it could do. Rows lead with the RESOLUTION, which is what a user
-				    recognises about their own footage. */}
-				<Popover open={fitMenuOpen} onOpenChange={setFitMenuOpen}>
-					<PopoverTrigger asChild>
-						<button
-							type="button"
-							className={styles.sectionAction}
-							disabled={!hasDocument || nativeFormats.length === 0}
-							onClick={(e) => {
-								// One shape means no decision to delegate: act, do not ask.
-								if (nativeFormats.length <= 1) {
-									e.preventDefault();
-									applyFitClip(nativeFormats[0].token);
-								}
-							}}
-						>
-							{ts("effects.fitClip")}
-						</button>
-					</PopoverTrigger>
-					<PopoverContent
-						align="center"
-						sideOffset={6}
-						collisionPadding={12}
-						animated={false}
-						className="w-auto border-0 bg-transparent p-0 shadow-none"
-					>
-						<div className={styles.actionMenu} role="menu" aria-label={ts("effects.fitClip")}>
-							{nativeFormats.map((format) => (
-								<button
-									type="button"
-									role="menuitem"
-									key={format.token}
-									className={styles.actionMenuRow}
-									onClick={() => {
-										setFitMenuOpen(false);
-										applyFitClip(format.token);
-									}}
-								>
-									<span className={styles.actionMenuMain}>
-										{format.width} × {format.height}
-									</span>
-									<span className={styles.actionMenuMeta}>{format.token}</span>
-									<span className={styles.actionMenuCount}>{clipCountLabel(format.clipCount)}</span>
-								</button>
-							))}
-						</div>
-					</PopoverContent>
-				</Popover>
-			</div>
+			{/* #84, "how do I turn the background off", has no button of its own: Padding at 0
+			    under Auto or an Original format frames the recording alone, and without a frame
+			    the corners go square with it (see `roundnessFrac`). A "Fit" action did the same
+			    in one click, but it rewrote four settings while naming none, and its menu
+			    repeated the Original row. */}
+			<div className={styles.sectionLabel}>{ts("effects.frame")}</div>
 			{/* The output shape moved here from the timeline toolbar. It is the one setting the
 			    other three depend on — padding, roundness and shadow only mean anything against
 			    a known frame — and among Trim / Speed / Zoom / transport it read as a playback
 			    control rather than as the shape of what gets exported. Its old placement was
 			    incidental: it arrived inside 1f25410b, a commit about per-clip crop export and
 			    a HUD redesign, and no decision record ever argued for it. */}
-			<div className={styles.paneRow}>
-				<span className={styles.label}>{ts("effects.format")}</span>
-				<Popover open={ratioMenuOpen} onOpenChange={setRatioMenuOpen}>
-					<PopoverTrigger asChild>
-						<button
-							type="button"
-							className={styles.rowAction}
-							disabled={!hasDocument}
-							aria-label={ts("effects.format")}
-						>
-							{/* `getAspectRatioLabel` hardcodes English "Original" for the legacy
-							    `"native"` value, which is still reachable: the v5→v6 migration only
-							    bakes it into a concrete token once clip dimensions are known, and
-							    leaves it alone until then. The group header below is localized, so
-							    without this the two would disagree in twelve locales. */}
-							{settings.aspectRatio === "auto"
-								? ts("effects.formatAuto")
-								: settings.aspectRatio === "native"
-									? ts("effects.formatOriginal")
-									: getAspectRatioLabel(settings.aspectRatio)}
-							<ChevronDown size={11} />
-						</button>
-					</PopoverTrigger>
-					<PopoverContent
-						align="end"
-						sideOffset={6}
-						collisionPadding={12}
-						animated={false}
-						className="w-auto border-0 bg-transparent p-0 shadow-none"
-					>
-						<div className={styles.actionMenu} role="menu" aria-label={ts("effects.format")}>
-							{/* Auto leads: it is the one entry that is a rule rather than a shape. */}
-							{autoAvailable || settings.aspectRatio === "auto" ? (
-								<button
-									type="button"
-									role="menuitem"
-									className={`${styles.actionMenuRow}${
-										settings.aspectRatio === "auto" ? ` ${styles.isActive}` : ""
-									}`}
-									disabled={!autoAvailable}
-									onClick={() => {
-										setRatioMenuOpen(false);
-										void set({ aspectRatio: "auto" });
-									}}
-								>
-									<span className={styles.actionMenuMain}>{ts("effects.formatAuto")}</span>
-									{!autoAvailable ? (
-										<span className={styles.actionMenuCount}>{ts("effects.formatAutoMixed")}</span>
-									) : autoDims ? (
-										<span className={styles.actionMenuCount}>
-											{`${autoDims.width}×${autoDims.height}`}
-										</span>
-									) : null}
-								</button>
-							) : null}
-							{ASPECT_RATIO_PRESETS.map((ratio) => (
-								<button
-									type="button"
-									role="menuitem"
-									key={ratio}
-									className={`${styles.actionMenuRow}${
-										ratio === settings.aspectRatio ? ` ${styles.isActive}` : ""
-									}`}
-									onClick={() => {
-										setRatioMenuOpen(false);
-										void set({ aspectRatio: ratio });
-									}}
-								>
-									<span className={styles.actionMenuMain}>{ratio}</span>
-								</button>
-							))}
-							{/* The timeline's own shapes stay listed here, and NOT only behind "fit":
-							    that action also zeroes the frame styling, so without these rows there
-							    would be no way to export at the footage's native shape while keeping a
-							    padded, rounded look. */}
-							{nativeFormats.length > 0 ? (
-								<>
-									<div className={styles.actionMenuGroup}>{ts("effects.formatOriginal")}</div>
-									{nativeFormats.map((format) => (
-										<button
-											type="button"
-											role="menuitem"
-											key={`native-${format.token}`}
-											className={`${styles.actionMenuRow}${
-												format.token === settings.aspectRatio ? ` ${styles.isActive}` : ""
-											}`}
-											onClick={() => {
-												setRatioMenuOpen(false);
-												void set({ aspectRatio: format.token });
-											}}
-										>
-											{/* Token leads and the pixel size rides on the right, exactly as this
-											    menu read in the timeline toolbar — here the row names an output
-											    FORMAT, so the ratio is the identity. (The "fit" menu leads with
-											    the resolution instead, because there a row names a clip.) */}
-											<span className={styles.actionMenuMain}>{format.token}</span>
-											<span className={styles.actionMenuCount}>
-												{`${format.width}×${format.height}`}
-												{nativeFormats.length > 1 ? ` · ${format.clipCount}` : ""}
-											</span>
-										</button>
-									))}
-								</>
-							) : null}
-						</div>
-					</PopoverContent>
-				</Popover>
-			</div>
-			{/* The frame drawn around the recording, and its theme. Two menus like Format above
-			    them, and for the same reason: each picks one project-wide look among a few. With a
-			    frame on, Roundness rounds the footage within that frame's own range, the body
-			    following concentric, and Shadow falls under the frame — both still move what
-			    they name. */}
-			<div className={styles.paneRow}>
-				<span className={styles.label} title={ts("effects.windowHelp")}>
-					{ts("effects.frameStyle")}
+			<div className={`${styles.field} ${styles.fieldStack}`}>
+				<span className={styles.fieldLabel}>
+					{ts("effects.format")}
+					{/* Auto is the one entry whose shape moves with the project (padding, camera
+					    layout, crop), so while it is the format the label says where it stands. The
+					    legacy `"native"` value presses no button: it only survives until the clip
+					    dimensions are known, and until then there is no Original row either. */}
+					{settings.aspectRatio === "auto" && autoState ? (
+						<span id={autoStateId} className={styles.sectionLabelValue}>
+							{autoState}
+						</span>
+					) : null}
 				</span>
-				<Popover open={frameMenuOpen} onOpenChange={setFrameMenuOpen}>
-					<PopoverTrigger asChild>
-						<button
-							type="button"
-							className={styles.rowAction}
+				<ChoiceRow<AspectRatio>
+					label={ts("effects.format")}
+					columns={4}
+					options={[
+						// Auto leads: it is the one entry that is a rule rather than a shape.
+						...(autoAvailable || settings.aspectRatio === "auto"
+							? [
+									{
+										value: "auto" as const,
+										label: ts("effects.formatAuto"),
+										disabled: !autoAvailable,
+										title: autoState ? `${ts("effects.formatAuto")} · ${autoState}` : undefined,
+									},
+								]
+							: []),
+						...ASPECT_RATIO_PRESETS.map((ratio) => ({ value: ratio, label: ratio })),
+					]}
+					value={settings.aspectRatio}
+					disabled={!hasDocument}
+					describedBy={settings.aspectRatio === "auto" && !autoAvailable ? autoStateId : undefined}
+					onChange={(aspectRatio) =>
+						void set(aspectRatio === "auto" ? { aspectRatio } : { aspectRatio, ...fillDefault })
+					}
+				/>
+				{/* The timeline's own shapes. Token first, then the pixel size: here a button names
+				    an output FORMAT, so the ratio is the identity. */}
+				{nativeFormats.length > 0 ? (
+					<>
+						<span className={styles.fieldLabel}>{ts("effects.formatOriginal")}</span>
+						<ChoiceRow<AspectRatio>
+							label={ts("effects.formatOriginal")}
+							columns={Math.min(nativeFormats.length, 2)}
+							options={nativeFormats.map((format) => {
+								const label = `${format.token} · ${format.width}×${format.height}`;
+								return {
+									value: format.token,
+									label,
+									title:
+										nativeFormats.length > 1
+											? `${label} · ${clipCountLabel(format.clipCount)}`
+											: undefined,
+								};
+							})}
+							value={settings.aspectRatio}
 							disabled={!hasDocument}
-							aria-label={ts("effects.frameStyle")}
-							title={ts("effects.windowHelp")}
-						>
-							{ts(RECORDING_FRAME_LABEL_KEYS[settings.frame])}
-							<ChevronDown size={11} />
-						</button>
-					</PopoverTrigger>
-					<PopoverContent
-						align="end"
-						sideOffset={6}
-						collisionPadding={12}
-						animated={false}
-						className="w-auto border-0 bg-transparent p-0 shadow-none"
-					>
-						<div className={styles.actionMenu} role="menu" aria-label={ts("effects.frameStyle")}>
-							{RECORDING_FRAMES.map((frame) => (
-								<button
-									type="button"
-									role="menuitem"
-									key={frame}
-									className={`${styles.actionMenuRow}${
-										frame === settings.frame ? ` ${styles.isActive}` : ""
-									}`}
-									onClick={() => {
-										setFrameMenuOpen(false);
-										void set({ frame });
-									}}
-								>
-									<span className={styles.actionMenuMain}>
-										{ts(RECORDING_FRAME_LABEL_KEYS[frame])}
-									</span>
-								</button>
-							))}
-						</div>
-					</PopoverContent>
-				</Popover>
+							onChange={(aspectRatio) => void set({ aspectRatio, ...fillDefault })}
+						/>
+					</>
+				) : null}
+			</div>
+			{/* How a recording of another shape sits in a fixed format: whole, or filling it with a
+			    window that follows the cursor. Only listed when the two shapes differ and the timeline
+			    has a single rule it could follow. */}
+			{fillAvailability === "available" ? (
+				<div className={`${styles.field} ${styles.fieldStack}`}>
+					<span className={styles.fieldLabel}>{ts("effects.formatFill")}</span>
+					<ChoiceRow<"fit" | "follow">
+						label={ts("effects.formatFill")}
+						options={[
+							{ value: "fit", label: ts("effects.formatFillFit") },
+							{ value: "follow", label: ts("effects.formatFillFollow") },
+						]}
+						value={fillActive ? "follow" : "fit"}
+						disabled={!hasDocument}
+						onChange={(v) => void set({ formatFollowCursor: v === "follow" })}
+					/>
+				</div>
+			) : null}
+			{/* The frame drawn around the recording, and its theme. Rows of buttons like Format
+			    above them, and for the same reason: each picks one project-wide look among a few.
+			    With a frame on, Roundness rounds the footage within that frame's own range, the
+			    body following concentric, and Shadow falls under the frame — both still move what
+			    they name. */}
+			<div className={`${styles.field} ${styles.fieldStack}`}>
+				{/* The tiles only draw their frame, so the label names the current one. */}
+				<span className={styles.fieldLabel}>
+					{ts("effects.frameStyle")}
+					<span className={styles.sectionLabelValue}>
+						{ts(RECORDING_FRAME_LABEL_KEYS[settings.frame])}
+					</span>
+				</span>
+				<ChoiceRow<RecordingFrame>
+					label={ts("effects.frameStyle")}
+					tiles
+					options={RECORDING_FRAMES.map((frame) => {
+						const Icon = RECORDING_FRAME_ICONS[frame];
+						return {
+							value: frame,
+							label: ts(RECORDING_FRAME_LABEL_KEYS[frame]),
+							icon: <Icon size={20} aria-hidden="true" />,
+						};
+					})}
+					value={settings.frame}
+					disabled={!hasDocument}
+					onChange={(frame) => void set({ frame })}
+				/>
 			</div>
 			{/* The theme rides WITH the frame: it only exists once there is a body to colour, so it
 			    appears next to the frame it recolours rather than sitting there inert. */}
 			{settings.frame !== "none" ? (
-				<div className={styles.paneRow}>
-					<span className={styles.label} title={ts("effects.frameThemeHelp")}>
-						{ts("effects.frameTheme")}
-					</span>
-					<Popover open={themeMenuOpen} onOpenChange={setThemeMenuOpen}>
-						<PopoverTrigger asChild>
-							<button
-								type="button"
-								className={styles.rowAction}
-								disabled={!hasDocument}
-								aria-label={ts("effects.frameTheme")}
-								title={ts("effects.frameThemeHelp")}
-							>
-								{ts(FRAME_THEME_LABEL_KEYS[settings.frameTheme])}
-								<ChevronDown size={11} />
-							</button>
-						</PopoverTrigger>
-						<PopoverContent
-							align="end"
-							sideOffset={6}
-							collisionPadding={12}
-							animated={false}
-							className="w-auto border-0 bg-transparent p-0 shadow-none"
-						>
-							<div className={styles.actionMenu} role="menu" aria-label={ts("effects.frameTheme")}>
-								{FRAME_THEMES.map((frameTheme) => (
-									<button
-										type="button"
-										role="menuitem"
-										key={frameTheme}
-										className={`${styles.actionMenuRow}${
-											frameTheme === settings.frameTheme ? ` ${styles.isActive}` : ""
-										}`}
-										onClick={() => {
-											setThemeMenuOpen(false);
-											void set({ frameTheme });
-										}}
-									>
-										<span className={styles.actionMenuMain}>
-											{ts(FRAME_THEME_LABEL_KEYS[frameTheme])}
-										</span>
-									</button>
-								))}
-							</div>
-						</PopoverContent>
-					</Popover>
+				<div className={`${styles.field} ${styles.fieldStack}`}>
+					<span className={styles.fieldLabel}>{ts("effects.frameTheme")}</span>
+					<ChoiceRow<FrameTheme>
+						label={ts("effects.frameTheme")}
+						options={FRAME_THEMES.map((frameTheme) => ({
+							value: frameTheme,
+							label: ts(FRAME_THEME_LABEL_KEYS[frameTheme]),
+						}))}
+						value={settings.frameTheme}
+						disabled={!hasDocument}
+						onChange={(frameTheme) => void set({ frameTheme })}
+					/>
 				</div>
 			) : null}
+			{namedLevelRow(
+				ts("effects.shadow"),
+				SHADOW_LEVELS.map((level) => ({ value: level.value, label: ts(level.labelKey) })),
+				settings.shadowIntensity,
+				!hasDocument,
+				(shadowIntensity) => {
+					void set({ shadowIntensity });
+					if (isNativeCompositorActive()) setNativeParam("shadow", shadowIntensity);
+				},
+			)}
 			<div className={styles.sliderGrid}>
-				<SliderCell
-					label={ts("effects.shadow")}
-					value={settings.shadowIntensity * 100}
-					min={0}
-					max={100}
-					suffix="%"
-					disabled={!hasDocument}
-					onChange={(v) => {
-						setLive({ shadowIntensity: v / 100 });
-						if (isNativeCompositorActive()) {
-							setNativeParam("shadow", v / 100);
-						}
-					}}
-					onCommit={() => void commit()}
-				/>
-				{/* Under a frame the slider spans 0 → the most that frame wears well (the native
-				    `frame_roundness_cap`), so its travel reads as a share of that range, not as
-				    pixels it no longer draws. The stored value stays in pixels either way. */}
-				<SliderCell
-					label={ts("effects.roundness")}
-					hint={framed ? ts("effects.roundnessFrameHelp") : undefined}
-					value={settings.borderRadius * roundnessScale}
-					min={0}
-					max={ROUNDNESS_SLIDER_MAX_PX * roundnessScale}
-					step={framed ? 1 : 0.5}
-					suffix={framed ? "%" : "px"}
-					disabled={!hasDocument}
-					onChange={(v) => {
-						const px = v / roundnessScale;
-						setLive({ borderRadius: px });
-						if (isNativeCompositorActive()) {
-							setNativeParam("roundness", px / NATIVE_SCREEN_BASE_RADIUS_PX);
-						}
-					}}
-					onCommit={() => void commit()}
-				/>
 				<SliderCell
 					label={ts("effects.padding")}
 					value={settings.padding}
 					min={0}
 					max={100}
+					defaultValue={DEFAULT_EDITOR_SETTINGS.padding}
 					suffix="%"
 					disabled={!hasDocument}
 					onChange={(v) => {
+						setScrubStartPadding((start) => start ?? settings.padding);
+						// Roundness is left as stored: at 0 the scene squares the corners, and the
+						// value is back when the padding is (`buildSceneDescription`).
 						setLive({ padding: v });
 						if (isNativeCompositorActive()) {
 							setNativeParam("padding", v / 100);
 						}
 					}}
-					onCommit={() => void commit()}
+					onCommit={() => {
+						setScrubStartPadding(null);
+						void commit();
+					}}
 				/>
+				{/* At 0% padding the corners only go square without a frame (`roundnessFrac`): under
+				    one, the frame meets the edges and the footage keeps the corners this sets. */}
+				{(scrubStartPadding ?? settings.padding) > 0 || framed ? (
+					<>
+						{/* Under a frame the slider spans 0 → the most that frame wears well (the native
+				    `frame_roundness_cap`), so its travel reads as a share of that range, not as
+				    pixels it no longer draws. The stored value stays in pixels either way. */}
+						<SliderCell
+							label={ts("effects.roundness")}
+							hint={framed ? ts("effects.roundnessFrameHelp") : undefined}
+							value={settings.borderRadius * roundnessScale}
+							min={0}
+							max={ROUNDNESS_SLIDER_MAX_PX * roundnessScale}
+							defaultValue={DEFAULT_EDITOR_SETTINGS.borderRadius * roundnessScale}
+							step={framed ? 1 : 0.5}
+							suffix={framed ? "%" : "px"}
+							disabled={!hasDocument}
+							onChange={(v) => {
+								const px = v / roundnessScale;
+								setLive({ borderRadius: px });
+								if (isNativeCompositorActive()) {
+									setNativeParam("roundness", px / NATIVE_SCREEN_BASE_RADIUS_PX);
+								}
+							}}
+							onCommit={() => void commit()}
+						/>
+					</>
+				) : null}
 			</div>
 			{/* Alone in its section, and correctly so: this blurs the RECORDING as it moves
 			    (zooms, layout changes) — see `effects.motion_blur` driving the tap count in
@@ -2737,6 +2622,7 @@ export function VideoEffectsPane() {
 					value={settings.motionBlurAmount * 100}
 					min={0}
 					max={100}
+					defaultValue={DEFAULT_EDITOR_SETTINGS.motionBlurAmount * 100}
 					suffix="%"
 					disabled={!hasDocument}
 					onChange={(v) => {
@@ -2749,22 +2635,19 @@ export function VideoEffectsPane() {
 				/>
 			</div>
 			{/* Next to motion blur because it is the other blur of the RECORDING. It only ever
-			    acts on a 3D-tilted zoom, so with none in the project the switch would move
-			    nothing on screen: it is disabled then, and the row says why. */}
-			<div className={styles.paneRow}>
-				<span className={styles.label}>
-					{ts("effects.depthOfField")}
-					<span className={styles.info}>
-						{hasTiltedZoom ? ts("effects.depthOfFieldHint") : ts("effects.depthOfFieldNoTilt")}
-					</span>
-				</span>
-				<Toggle
-					checked={settings.depthOfField}
-					ariaLabel={ts("effects.depthOfField")}
-					disabled={!hasDocument || !hasTiltedZoom}
-					onChange={(v) => void set({ depthOfField: v })}
-				/>
-			</div>
+			    acts on a 3D-tilted zoom, so with none in the project it is not offered. */}
+			{hasTiltedZoom ? (
+				<div className={styles.paneRow}>
+					<span className={styles.label}>{ts("effects.depthOfField")}</span>
+					<Toggle
+						checked={settings.depthOfField}
+						ariaLabel={ts("effects.depthOfField")}
+						tooltip={ts("effects.depthOfFieldTip")}
+						disabled={!hasDocument}
+						onChange={(v) => void set({ depthOfField: v })}
+					/>
+				</div>
+			) : null}
 		</Pane>
 	);
 }
@@ -2817,8 +2700,8 @@ const NATIVE_WEBCAM_BASE_PCT = 16.7;
 
 // The camera's two proportions. Its rounding is the slider under them, and each icon draws it.
 const CAMERA_SHAPES = [
-	{ value: "rectangle", labelKey: "layout.shapes.rectangle", x: 3, y: 6, w: 18, h: 12 },
 	{ value: "square", labelKey: "layout.shapes.square", x: 4, y: 4, w: 16, h: 16 },
+	{ value: "rectangle", labelKey: "layout.shapes.original", x: 3, y: 6, w: 18, h: 12 },
 ] as const satisfies ReadonlyArray<{ value: WebcamMask } & Record<string, unknown>>;
 
 const ANCHOR_KEYS: Record<WebcamAnchor, string> = {
@@ -3036,6 +2919,8 @@ export function LayoutPane() {
 					<span className={styles.label}>{ts("layout.reactiveWebcam")}</span>
 					<Toggle
 						checked={settings.webcamReactiveZoom}
+						ariaLabel={ts("layout.reactiveWebcam")}
+						tooltip={ts("layout.reactiveWebcamTip")}
 						disabled={layoutControlsDisabled}
 						onChange={(v) => void set({ webcamReactiveZoom: v })}
 					/>
@@ -3075,7 +2960,13 @@ export function LayoutPane() {
 							value={settings.webcamMaskShape}
 							disabled={layoutControlsDisabled}
 							onChange={(shape) => {
-								void set({ webcamMaskShape: shape });
+								// An untouched roundness follows the shape to its own default; a tuned one stays.
+								const untouched =
+									settings.webcamRoundness === DEFAULT_WEBCAM_ROUNDNESS[settings.webcamMaskShape];
+								void set({
+									webcamMaskShape: shape,
+									...(untouched ? { webcamRoundness: DEFAULT_WEBCAM_ROUNDNESS[shape] } : {}),
+								});
 								if (isNativeCompositorActive()) {
 									setNativeParam("webcamShape", shape);
 								}
@@ -3089,6 +2980,7 @@ export function LayoutPane() {
 							value={Math.round(settings.webcamRoundness * 100)}
 							min={0}
 							max={100}
+							defaultValue={Math.round(DEFAULT_WEBCAM_ROUNDNESS[settings.webcamMaskShape] * 100)}
 							suffix="%"
 							disabled={layoutControlsDisabled}
 							onChange={(next) => setLive({ webcamRoundness: next / 100 })}
@@ -3100,6 +2992,7 @@ export function LayoutPane() {
 							value={settings.webcamSizePreset}
 							min={WEBCAM_SIZE_MIN}
 							max={WEBCAM_SIZE_MAX}
+							defaultValue={DEFAULT_EDITOR_SETTINGS.webcamSizePreset}
 							step={1}
 							suffix="%"
 							disabled={layoutControlsDisabled}
@@ -3176,9 +3069,7 @@ export function LayoutPane() {
 									>
 										{mode.icon}
 									</svg>
-									<span title={ts(mode.labelKey)} style={{ font: "500 12px/1 var(--font-body)" }}>
-										{ts(mode.labelKey)}
-									</span>
+									<span style={{ font: "500 12px/1 var(--font-body)" }}>{ts(mode.labelKey)}</span>
 								</button>
 							);
 						})}
@@ -3190,6 +3081,7 @@ export function LayoutPane() {
 								value={Math.round(settings.webcamBlurIntensity * 100)}
 								min={0}
 								max={100}
+								defaultValue={Math.round(DEFAULT_EDITOR_SETTINGS.webcamBlurIntensity * 100)}
 								suffix="%"
 								disabled={layoutControlsDisabled}
 								onChange={(next) => setLive({ webcamBlurIntensity: next / 100 })}
@@ -3216,10 +3108,18 @@ export function LayoutPane() {
 			<div className={styles.sectionLabel}>{ts("layout.webcamFraming")}</div>
 			<WebcamFraming
 				label={ts("layout.webcamFraming")}
-				zoomLabel={ts("layout.webcamCropZoom")}
 				src={cameraSrc}
 				crop={webcamCrop}
 				pan={cropPan}
+				background={
+					canSegmentCamera && settings.webcamBackgroundMode !== "none"
+						? {
+								mode: settings.webcamBackgroundMode,
+								blurIntensity: settings.webcamBlurIntensity,
+								wallpaper: settings.webcamWallpaper,
+							}
+						: null
+				}
 				disabled={layoutControlsDisabled}
 				hint={ts("layout.webcamFramingDrag")}
 				onFrameLive={setCropFrame}
@@ -3234,6 +3134,35 @@ const MIN_CROP_SIZE = 1 / 3;
 const FRAME_CORNERS = ["nw", "ne", "sw", "se"] as const;
 type FrameCorner = (typeof FRAME_CORNERS)[number];
 
+/** The thumbnail's frame, cut out once: a subject mask to lay over the video, and a small copy
+ *  of the frame for the blur mode to blur. `null` when this machine cannot segment. */
+async function cutOutSubject(
+	video: HTMLVideoElement,
+): Promise<{ mask: string; backdrop: string } | null> {
+	const canvas = document.createElement("canvas");
+	const ctx = canvas.getContext("2d");
+	if (!ctx || video.videoWidth === 0) return null;
+	// Blurred, a small copy is as good as the full frame. It keeps the camera's shape.
+	canvas.width = SEGMENTATION_WIDTH;
+	canvas.height = Math.round((SEGMENTATION_WIDTH * video.videoHeight) / video.videoWidth);
+	ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+	const backdrop = canvas.toDataURL("image/jpeg");
+	// The model sees the whole frame squeezed to its input size, as the compositor feeds it.
+	canvas.width = SEGMENTATION_WIDTH;
+	canvas.height = SEGMENTATION_HEIGHT;
+	ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+	const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+	const mask = await segmentCameraFrame(new Uint8Array(pixels.buffer));
+	if (!mask) return null;
+	// Stretched back over the video by `mask-size: 100% 100%`, as the shader samples it.
+	const alpha = ctx.createImageData(canvas.width, canvas.height);
+	mask.forEach((value, i) => {
+		alpha.data[i * 4 + 3] = value;
+	});
+	ctx.putImageData(alpha, 0, 0);
+	return { mask: canvas.toDataURL(), backdrop };
+}
+
 /** Où la webcam cadre, réglé à la main : une vignette de la caméra, le cadre gardé posé dessus.
  *  Le cadre EST le réglage : on le glisse pour choisir ce qu'il montre, on tire un coin pour
  *  zoomer, comme n'importe quel outil de recadrage. Il garde la forme de la caméra, que la
@@ -3245,26 +3174,58 @@ type FrameCorner = (typeof FRAME_CORNERS)[number];
  *  écrivent en direct et enregistrent au relâchement, comme un curseur. */
 function WebcamFraming({
 	label,
-	zoomLabel,
 	src,
 	crop,
 	pan,
+	background,
 	disabled,
 	hint,
 	onFrameLive,
 	onCommit,
 }: {
 	label: string;
-	zoomLabel: string;
 	src: string | null;
 	crop: { x: number; y: number; width: number; height: number };
 	pan: { x: number; y: number };
+	/** The camera background to show on the thumbnail, `null` for the raw camera. */
+	background: {
+		mode: Exclude<WebcamBackgroundMode, "none">;
+		blurIntensity: number;
+		wallpaper: string;
+	} | null;
 	disabled: boolean;
 	hint: string;
 	onFrameLive: (size: number, pan: { x: number; y: number }) => void;
 	onCommit: () => void;
 }) {
 	const boxRef = useRef<HTMLDivElement | null>(null);
+	const videoRef = useRef<HTMLVideoElement | null>(null);
+	// The source whose chosen frame is on screen, the one the cutout is taken from.
+	const [seekedSrc, setSeekedSrc] = useState<string | null>(null);
+	// Segmented once per source: the mask depends on the picture alone, so changing the mode,
+	// the blur or the wallpaper afterwards is plain CSS over it. Nothing runs while the
+	// background is "none".
+	const [cutout, setCutout] = useState<{ src: string; mask: string; backdrop: string } | null>(
+		null,
+	);
+	const wantsCutout = background !== null;
+	useEffect(() => {
+		const video = videoRef.current;
+		if (!wantsCutout || !video || src === null || seekedSrc !== src) return;
+		let current = true;
+		cutOutSubject(video)
+			.then((result) => {
+				if (current && result) setCutout({ src, ...result });
+			})
+			.catch((err) => console.warn("[webcam-framing] segmentation failed:", err));
+		return () => {
+			current = false;
+		};
+	}, [wantsCutout, src, seekedSrc]);
+	const shown = background && cutout?.src === src ? cutout : null;
+	// The shader's blur radius (`blur_webcam_bg`) as a CSS deviation, at the scale of a typical
+	// PiP bubble: the thumbnail cannot know the real one, so this is close, not exact.
+	const blurPx = background ? (background.blurIntensity * 22 + 1.5) / 4 : 0;
 	const gestureRef = useRef<
 		| { kind: "move"; x: number; y: number; pan: { x: number; y: number } }
 		| { kind: "resize"; anchor: { x: number; y: number }; corner: FrameCorner }
@@ -3337,11 +3298,32 @@ function WebcamFraming({
 	return (
 		<div className={styles.framing}>
 			<div ref={boxRef} className={styles.framingBox} style={{ aspectRatio: aspect }}>
+				{shown && background?.mode === "blur" ? (
+					// Oversized by the blur's reach, so its faded edge falls outside the box.
+					<div
+						aria-hidden="true"
+						style={{
+							position: "absolute",
+							inset: -2 * blurPx,
+							background: `center / cover no-repeat url(${shown.backdrop})`,
+							filter: `blur(${blurPx}px)`,
+						}}
+					/>
+				) : shown && background?.mode === "custom" ? (
+					<div
+						aria-hidden="true"
+						style={{ position: "absolute", inset: 0, ...wallpaperStyle(background.wallpaper) }}
+					/>
+				) : null}
 				{src ? (
 					<video
+						ref={videoRef}
 						className={styles.framingVideo}
 						src={src}
-						style={{ visibility: ready ? "visible" : "hidden" }}
+						style={{
+							visibility: ready ? "visible" : "hidden",
+							...(shown ? { maskImage: `url(${shown.mask})`, maskSize: "100% 100%" } : {}),
+						}}
 						muted
 						playsInline
 						preload="metadata"
@@ -3354,6 +3336,7 @@ function WebcamFraming({
 							// A frame from the take rather than its first one, which is often black.
 							video.currentTime = Math.min(1, (video.duration || 0) / 2);
 						}}
+						onSeeked={() => setSeekedSrc(src)}
 					/>
 				) : null}
 				<div
@@ -3439,9 +3422,7 @@ function WebcamFraming({
 								/>
 							))}
 				</div>
-				<span className={styles.framingZoom} title={zoomLabel}>
-					{Math.round(100 / size)}%
-				</span>
+				<span className={styles.framingZoom}>{Math.round(100 / size)}%</span>
 			</div>
 			<p className={styles.framingHint}>{hint}</p>
 		</div>
@@ -3461,6 +3442,7 @@ export function AudioPane() {
 					value={settings.audioGainDb}
 					min={-AUDIO_GAIN_DB_LIMIT}
 					max={AUDIO_GAIN_DB_LIMIT}
+					defaultValue={0}
 					step={0.5}
 					decimals={1}
 					suffix=" dB"
@@ -3651,10 +3633,10 @@ export function AudioTrackPane({ tl, onClose }: { tl: TimelineApi; onClose?: () 
 					setLiveGain(null);
 					setLiveFadeIn(null);
 					setLiveFadeOut(null);
+					// Back to what a new track of this kind starts at: a bed returns UNDER the
+					// voice, not to a 0 dB level that buries it.
 					void tl.updateAudioTrack(track.id, {
-						gainDb: 0,
-						fadeInMs: 0,
-						fadeOutMs: 0,
+						...audioTrackDefaults(track.kind),
 						muted: false,
 						loop: false,
 					});
@@ -3692,30 +3674,43 @@ export function CursorPane() {
 	// handlers below push diffs live. Sizes are sent as direct scales (1 = fixture default).
 	// Synchro initiale : cf. NativeCompositorOverlay (`pushAllNativeParams`).
 
-	// Built-in "Default" plus each bundled theme. When arrow and pointer art
-	// differ, both sprites are shown so a pack is not previewed as arrow-only.
+	// Built-in "Default" plus each bundled theme, previewed by its main arrow only: the sprite the
+	// compositor draws, centred on its art. The default's SVG drew its arrow in the lower-right
+	// corner of an empty square, off the centre of its cell.
 	const cursorThemeOptions = useMemo(
-		() => [
-			{
-				id: DEFAULT_CURSOR_THEME_ID,
-				name: ts("cursor.themeDefault"),
-				previewUrls: [defaultCursorPreviewUrl],
-			},
-			...CURSOR_THEMES.map((theme) => {
-				const preview = themePickerPreviewAssets(theme);
-				const urls = [
-					preview.arrow ? safeAssetUrl(preview.arrow) : defaultCursorPreviewUrl,
-					...(preview.pointer ? [safeAssetUrl(preview.pointer)] : []),
-				];
-				return {
-					id: theme.id,
-					name: theme.name,
-					previewUrls: urls,
-				};
-			}),
-		],
+		() =>
+			[null, ...CURSOR_THEMES].map((theme) => ({
+				id: theme?.id ?? DEFAULT_CURSOR_THEME_ID,
+				name: theme?.name ?? ts("cursor.themeDefault"),
+				previewUrl: safeAssetUrl(
+					themePickerPreviewAssets(theme).arrow || DEFAULT_CURSOR_SPRITES.arrow.assetPath,
+				),
+			})),
 		[ts],
 	);
+
+	// What the preview draws for each state: the theme's art, the built-in art where it has none.
+	const cursorSprites = useMemo(
+		() => resolveCursorSprites(settings.cursorTheme),
+		[settings.cursorTheme],
+	);
+	const recordedTypes = useRecordedCursorTypes();
+	// Each kind the video shows, pictured by the first of its states it shows.
+	const recordedKinds = CURSOR_KIND_IDS.flatMap((kind) => {
+		const type = CURSOR_KINDS[kind].find((state) => recordedTypes?.has(state));
+		return type ? [{ kind, type }] : [];
+	});
+	const cursorKindLabels: Record<CursorKind, string> = {
+		pointer: ts("cursor.typePointer"),
+		text: ts("cursor.typeText"),
+		grab: ts("cursor.typeGrab"),
+		resize: ts("cursor.typeResize"),
+		busy: ts("cursor.typeBusy"),
+		crosshair: ts("cursor.typeCrosshair"),
+		"not-allowed": ts("cursor.typeNotAllowed"),
+		help: ts("cursor.typeHelp"),
+		"up-arrow": ts("cursor.typeUpArrow"),
+	};
 
 	return (
 		<Pane
@@ -3741,6 +3736,7 @@ export function CursorPane() {
 				<span className={styles.label}>{ts("cursor.autoHide")}</span>
 				<Toggle
 					ariaLabel={ts("cursor.autoHide")}
+					tooltip={ts("cursor.autoHideTip")}
 					checked={settings.cursorAutoHide}
 					disabled={!hasDocument || !settings.cursorShow}
 					onChange={(v) => {
@@ -3751,88 +3747,133 @@ export function CursorPane() {
 					}}
 				/>
 			</div>
-			{/* One switch for the modelled cursor. A hidden cursor has nothing to model, so the
-			    row is disabled then and both its hint and its tooltip say why. */}
-			<div
-				className={styles.paneRow}
-				title={settings.cursorShow ? undefined : ts("cursor.model3dNeedsCursor")}
-			>
-				<span className={styles.label}>
-					{ts("cursor.model3d")}
-					<span className={styles.info}>
-						{settings.cursorShow ? ts("cursor.model3dHint") : ts("cursor.model3dNeedsCursor")}
-					</span>
-				</span>
-				<Toggle
-					ariaLabel={ts("cursor.model3d")}
-					checked={settings.cursor.model3d}
-					disabled={!hasDocument || !settings.cursorShow}
-					onChange={(v) => {
-						void set({ cursor: { model3d: v } });
-						if (isNativeCompositorActive()) {
-							setNativeParam("cursorModel3d", v);
-						}
-					}}
-				/>
-			</div>
-			<div className={styles.paneRow}>
-				<span className={styles.label}>
-					{ts("cursor.alwaysArrow")}
-					<span className={styles.info}>{ts("cursor.alwaysArrowHint")}</span>
-				</span>
-				<Toggle
-					ariaLabel={ts("cursor.alwaysArrow")}
-					checked={settings.cursor.alwaysArrow}
-					disabled={!hasDocument || !settings.cursorShow}
-					onChange={(v) => void set({ cursor: { alwaysArrow: v } })}
-				/>
-			</div>
-			<div className={styles.sectionLabel}>{ts("cursor.theme")}</div>
-			<div className={styles.cursorGrid}>
-				{cursorThemeOptions.map((option) => {
-					const isActive = settings.cursorTheme === option.id;
-					return (
-						<button
-							type="button"
-							key={option.id}
-							className={`${styles.cursorCell} ${isActive ? styles.isActive : ""}`}
-							title={option.name}
-							aria-label={option.name}
-							aria-pressed={isActive}
-							disabled={!hasDocument}
-							onClick={() => void set({ cursor: { theme: option.id } })}
-						>
-							<span className={styles.cursorCellPreviews}>
-								{option.previewUrls.map((url) => (
+			{/* One option is not a choice: the picker shows once a pack ships beside the
+			    default art (see CURSOR_THEMES). */}
+			{cursorThemeOptions.length > 1 ? (
+				<>
+					<div className={styles.sectionLabel}>{ts("cursor.theme")}</div>
+					<div className={styles.cursorGrid}>
+						{cursorThemeOptions.map((option) => {
+							const isActive = settings.cursorTheme === option.id;
+							return (
+								<button
+									type="button"
+									key={option.id}
+									className={`${styles.cursorCell} ${isActive ? styles.isActive : ""}`}
+									title={option.name}
+									aria-label={option.name}
+									aria-pressed={isActive}
+									disabled={!hasDocument}
+									onClick={() => void set({ cursor: { theme: option.id } })}
+								>
 									<img
-										key={url}
-										src={url}
+										src={option.previewUrl}
 										alt=""
-										width={option.previewUrls.length > 1 ? 14 : 20}
-										height={option.previewUrls.length > 1 ? 14 : 20}
+										className={styles.cursorSprite}
 										draggable={false}
-										style={{ objectFit: "contain", pointerEvents: "none" }}
 									/>
-								))}
-							</span>
-						</button>
-					);
-				})}
-			</div>
+								</button>
+							);
+						})}
+					</div>
+				</>
+			) : null}
+			{/* A hidden cursor has nothing to model or redraw, so these rows are not offered then. */}
+			{settings.cursorShow ? (
+				<>
+					<div className={`${styles.paneRow} ${styles.paneRowTight}`}>
+						<span className={styles.label}>{ts("cursor.model3d")}</span>
+						<Toggle
+							ariaLabel={ts("cursor.model3d")}
+							tooltip={ts("cursor.model3dTip")}
+							checked={settings.cursor.model3d}
+							disabled={!hasDocument}
+							onChange={(v) => {
+								void set({ cursor: { model3d: v } });
+								if (isNativeCompositorActive()) {
+									setNativeParam("cursorModel3d", v);
+								}
+							}}
+						/>
+					</div>
+					{recordedKinds.length > 0 ? (
+						<>
+							<div className={styles.sectionLabel}>{ts("cursor.types")}</div>
+							{/* The cursors the video shows, each drawn as recorded (lit) or as the arrow
+							    (dimmed). The arrow's own cell is not a control: it is what the others
+							    become. Space and Enter toggle the focused cell and stop there: the
+							    editor's shortcuts on `window` would also play the video. */}
+							<div
+								role="group"
+								aria-label={ts("cursor.types")}
+								className={styles.cursorGrid}
+								onKeyDown={(e) => {
+									if (e.key === "Enter" || e.key === " ") e.nativeEvent.stopPropagation();
+								}}
+							>
+								<span
+									role="img"
+									aria-label={ts("cursor.typeArrow")}
+									title={ts("cursor.typeArrow")}
+									className={`${styles.cursorCell} ${styles.isActive} ${styles.cursorCellFixed}`}
+								>
+									<img
+										src={safeAssetUrl(cursorSprites.arrow.assetPath)}
+										alt=""
+										className={styles.cursorSprite}
+										draggable={false}
+									/>
+								</span>
+								{recordedKinds.map(({ kind, type }) => {
+									const shown = !settings.cursor.asArrow.includes(kind);
+									const label = cursorKindLabels[kind];
+									return (
+										<button
+											type="button"
+											key={kind}
+											className={`${styles.cursorCell} ${shown ? styles.isActive : styles.cursorCellOff}`}
+											title={shown ? label : ts("cursor.typeAsArrow", { type: label })}
+											aria-label={label}
+											aria-pressed={shown}
+											disabled={!hasDocument}
+											onClick={() =>
+												void set({
+													cursor: {
+														asArrow: CURSOR_KIND_IDS.filter((k) =>
+															k === kind ? shown : settings.cursor.asArrow.includes(k),
+														),
+													},
+												})
+											}
+										>
+											<img
+												src={safeAssetUrl(cursorSprites[type].assetPath)}
+												alt=""
+												className={styles.cursorSprite}
+												draggable={false}
+											/>
+										</button>
+									);
+								})}
+							</div>
+						</>
+					) : null}
+				</>
+			) : null}
 			<div className={styles.sliderGrid}>
+				{/* A slider, not named steps: "a bit bigger" is a size between two of them.
+				    `SETTING_BOUNDS` keeps both ends sane. */}
 				<SliderCell
 					label={ts("cursor.size")}
-					value={settings.cursor.size * 10}
-					min={5}
-					max={100}
-					step={0.1}
-					decimals={1}
+					value={settings.cursor.size}
+					min={SETTING_BOUNDS.cursorSize[0]}
+					max={SETTING_BOUNDS.cursorSize[1]}
+					step={0.05}
+					defaultValue={DEFAULT_EDITOR_SETTINGS.cursor.size}
 					disabled={!hasDocument}
 					onChange={(v) => {
-						setLive({ cursor: { size: v / 10 } });
-						if (isNativeCompositorActive()) {
-							setNativeParam("cursorSize", v / 10);
-						}
+						setLive({ cursor: { size: v } });
+						if (isNativeCompositorActive()) setNativeParam("cursorSize", v);
 					}}
 					onCommit={() => void commit()}
 				/>
@@ -3841,6 +3882,7 @@ export function CursorPane() {
 					value={settings.cursor.smoothing * 100}
 					min={0}
 					max={100}
+					defaultValue={DEFAULT_EDITOR_SETTINGS.cursor.smoothing * 100}
 					suffix="%"
 					disabled={!hasDocument}
 					onChange={(v) => {
@@ -3856,6 +3898,7 @@ export function CursorPane() {
 					value={settings.cursor.motionBlur * 100}
 					min={0}
 					max={100}
+					defaultValue={DEFAULT_EDITOR_SETTINGS.cursor.motionBlur * 100}
 					suffix="%"
 					disabled={!hasDocument}
 					onChange={(v) => {
@@ -3866,23 +3909,31 @@ export function CursorPane() {
 					}}
 					onCommit={() => void commit()}
 				/>
-				<SliderCell
-					label={ts("cursor.clickBounce")}
-					value={settings.cursor.clickBounce * 10}
-					min={0}
-					max={50}
-					step={0.1}
-					decimals={1}
-					disabled={!hasDocument}
-					onChange={(v) => {
-						setLive({ cursor: { clickBounce: v / 10 } });
-						if (isNativeCompositorActive()) {
-							setNativeParam("cursorClickBounce", v / 10);
-						}
-					}}
-					onCommit={() => void commit()}
-				/>
 			</div>
+			{namedLevelRow(
+				ts("cursor.clickBounce"),
+				CLICK_BOUNCE_LEVELS.map((level) => ({ value: level.value, label: ts(level.labelKey) })),
+				settings.cursor.clickBounce,
+				!hasDocument,
+				(clickBounce) => {
+					void set({ cursor: { clickBounce } });
+					if (isNativeCompositorActive()) setNativeParam("cursorClickBounce", clickBounce);
+				},
+			)}
+			{/* What the screen does on the click the bounce animates, so right under it. A hidden
+			    cursor has nothing to click with, so the row is not offered then. */}
+			{settings.cursorShow ? (
+				<div className={styles.paneRow}>
+					<span className={styles.label}>{ts("cursor.clickImpact")}</span>
+					<Toggle
+						ariaLabel={ts("cursor.clickImpact")}
+						tooltip={ts("cursor.clickImpactTip")}
+						checked={settings.cursor.clickImpact}
+						disabled={!hasDocument}
+						onChange={(v) => void set({ cursor: { clickImpact: v } })}
+					/>
+				</div>
+			) : null}
 		</Pane>
 	);
 }
@@ -3897,6 +3948,7 @@ export function Toggle({
 	checked,
 	disabled,
 	ariaLabel,
+	tooltip,
 	onChange,
 }: {
 	checked: boolean;
@@ -3904,9 +3956,12 @@ export function Toggle({
 	/** The switch renders no text of its own, so a screen reader has nothing to announce
 	 *  unless a caller names it. Optional only because the existing call sites predate it. */
 	ariaLabel?: string;
+	/** What the switch does, for a label that is jargon ("Click impact"). The trigger is the
+	 *  switch itself, so a keyboard user reaches it too. A label that is clear gets none. */
+	tooltip?: string;
 	onChange: (next: boolean) => void;
 }) {
-	return (
+	const button = (
 		<button
 			type="button"
 			className={`${styles.toggle} ${checked ? styles.isOn : ""}`}
@@ -3915,6 +3970,15 @@ export function Toggle({
 			disabled={disabled}
 			onClick={() => onChange(!checked)}
 		/>
+	);
+	// Its own provider, like the timeline toolbar: a pane renders without the app's root one in
+	// the tests, and a Radix tooltip throws without any.
+	return tooltip ? (
+		<TooltipProvider>
+			<Tooltip content={tooltip}>{button}</Tooltip>
+		</TooltipProvider>
+	) : (
+		button
 	);
 }
 
@@ -3934,10 +3998,22 @@ export function ChoiceRow<T extends string | number>({
 	columns,
 	tiles,
 	display,
+	describedBy,
 }: {
 	label: string;
-	/** `null` leaves a hole in the grid: the middle of the camera's position grid. */
-	options: ReadonlyArray<{ value: T; label: string; icon?: ReactNode } | null>;
+	/** `null` leaves a hole in the grid: the middle of the camera's position grid. An option
+	 *  can be `disabled` on its own: a disabled button takes no focus, so its `title` is only a
+	 *  mouse hint, and the reason must also be visible text the row points at (`describedBy`).
+	 *  `title` is a tooltip that adds to the label (a clip count). An icon-only option gets its
+	 *  label as its tooltip; one whose label is visible gets none. `null` is for an icon that
+	 *  already spells the label, a font drawn in its own face. */
+	options: ReadonlyArray<{
+		value: T;
+		label: string;
+		icon?: ReactNode;
+		disabled?: boolean;
+		title?: string | null;
+	} | null>;
 	value: T;
 	onChange: (next: T) => void;
 	disabled?: boolean;
@@ -3948,6 +4024,8 @@ export function ChoiceRow<T extends string | number>({
 	/** Ce que montre un bouton. Par défaut l'icône s'il y en a une, et alors `label` lui sert de
 	 *  nom ; sinon le texte. */
 	display?: "text" | "icon" | "both";
+	/** Id of the visible text that explains the row, typically why some options are disabled. */
+	describedBy?: string;
 }) {
 	const buttonsRef = useRef<Array<HTMLButtonElement | null>>([]);
 	const mode = display ?? (options.some((o) => o?.icon) ? "icon" : "text");
@@ -3955,6 +4033,7 @@ export function ChoiceRow<T extends string | number>({
 		<div
 			role="group"
 			aria-label={label}
+			aria-describedby={describedBy}
 			className={`${styles.choiceRow} ${tiles ? styles.choiceRowTiles : ""}`}
 			style={{ gridTemplateColumns: `repeat(${columns ?? options.length}, minmax(0, 1fr))` }}
 			onKeyDown={(e) => {
@@ -3973,8 +4052,11 @@ export function ChoiceRow<T extends string | number>({
 				e.nativeEvent.stopPropagation();
 				const focused = buttonsRef.current.findIndex((b) => b === document.activeElement);
 				const from = focused >= 0 ? focused : options.findIndex((o) => o?.value === value);
-				// A hole is stepped over, not landed on.
-				const to = options[from + step] === null ? from + 2 * step : from + step;
+				// Holes and disabled options are stepped over, not landed on.
+				let to = from + step;
+				while (to >= 0 && to < options.length && (options[to] ?? { disabled: true }).disabled) {
+					to += step;
+				}
 				const next = options[to];
 				if (!next) return;
 				buttonsRef.current[to]?.focus();
@@ -3984,6 +4066,10 @@ export function ChoiceRow<T extends string | number>({
 			{options.map((option, i) => {
 				if (option === null) return <span key={`hole-${i}`} aria-hidden="true" />;
 				const pressed = option.value === value;
+				// A tooltip only where it tells something the button does not: the name of an
+				// icon-only option, or the text a caller passes. A visible label is never repeated
+				// (technical-documentation/engineering/tooltips.md, rule 3).
+				const tip = option.title === undefined && mode === "icon" ? option.label : option.title;
 				return (
 					<button
 						key={String(option.value)}
@@ -3994,9 +4080,8 @@ export function ChoiceRow<T extends string | number>({
 						className={`${styles.choiceBtn} ${pressed ? styles.isActive : ""}`}
 						aria-pressed={pressed}
 						aria-label={mode === "icon" ? option.label : undefined}
-						// Always: a label cut short by a narrow pane still reads in full on hover.
-						title={option.label}
-						disabled={disabled}
+						title={tip ?? undefined}
+						disabled={disabled || option.disabled}
 						// Re-choisir la valeur en place n'est pas une modification : ni sauvegarde ni
 						// entrée d'annulation.
 						onClick={() => {
@@ -4018,6 +4103,46 @@ export function ChoiceRow<T extends string | number>({
 	);
 }
 
+/**
+ * The named levels that replace a slider for a value whose number means nothing to a user.
+ * Screen Studio's rule: a style is chosen by what it looks like, never by "30.0". Each list
+ * holds the default (`DEFAULT_PROJECT_APPEARANCE`) and stays inside `SETTING_BOUNDS`.
+ */
+const CLICK_BOUNCE_LEVELS = [
+	{ value: 0, labelKey: "cursor.bounceNone" },
+	{ value: 1, labelKey: "cursor.bounceLight" },
+	{ value: 2, labelKey: "cursor.bounceStrong" },
+] as const;
+const SHADOW_LEVELS = [
+	{ value: 0, labelKey: "effects.shadowNone" },
+	{ value: 0.3, labelKey: "effects.shadowLight" },
+	{ value: 0.6, labelKey: "effects.shadowMedium" },
+	{ value: 0.9, labelKey: "effects.shadowStrong" },
+] as const;
+
+/** A labelled row of named levels. A stored value between two levels (an older project, a
+ *  preset) presses no button, the way a speed outside the row does. */
+function namedLevelRow(
+	label: string,
+	options: ReadonlyArray<{ value: number; label: string }>,
+	value: number,
+	disabled: boolean,
+	onChange: (next: number) => void,
+) {
+	return (
+		<div className={`${styles.field} ${styles.fieldStack}`}>
+			<span className={styles.fieldLabel}>{label}</span>
+			<ChoiceRow<number>
+				label={label}
+				options={options}
+				value={value}
+				disabled={disabled}
+				onChange={onChange}
+			/>
+		</div>
+	);
+}
+
 /** Le slider commun des panneaux — exporté pour que l'inspecteur V4 s'en serve au lieu de
  *  restyler un `<input type="range">` isolé qui ne ressemblait à rien de l'app. Il porte aussi
  *  la bonne cadence : `onChange` en direct, `onCommit` à la fin du geste. */
@@ -4032,9 +4157,12 @@ export function SliderCell({
 	disabled,
 	onChange,
 	onCommit,
-	showValue = true,
+	// A number with no unit ("30.0" for a cursor size) says nothing a user can act on: the
+	// track's position already shows where the value sits.
+	showValue = suffix !== "",
 	full = false,
 	hint,
+	defaultValue,
 }: {
 	label: string;
 	value: number;
@@ -4053,8 +4181,20 @@ export function SliderCell({
 	/** Une phrase qui dit ce que la course du slider signifie quand ce n'est pas l'évidence
 	 *  (Roundness sous un cadre) : l'infobulle du libellé et du slider. */
 	hint?: string;
+	/** The value a reset returns to, in the slider's own units. With it, a slider moved off it
+	 *  shows a reset button. Not a double-click on the track: its two mouse-ups would each
+	 *  commit, leaving intermediate values in the undo history before the reset. */
+	defaultValue?: number;
 }) {
+	const tc = useScopedT("common");
 	const pct = Math.max(0, Math.min(100, max > min ? ((value - min) / (max - min)) * 100 : 0));
+	// Within a thousandth of a step: a stored value comes back through a unit conversion.
+	const modified = defaultValue !== undefined && Math.abs(value - defaultValue) > step / 1000;
+	const reset = () => {
+		if (!modified || disabled || defaultValue === undefined) return;
+		onChange(defaultValue);
+		onCommit();
+	};
 	return (
 		<div className={`${styles.sliderCell}${full ? ` ${styles.full}` : ""}`}>
 			<div className={styles.head}>
@@ -4066,6 +4206,19 @@ export function SliderCell({
 						{value.toFixed(decimals)}
 						{suffix}
 					</span>
+				) : null}
+				{/* Only once the value has moved: at the default there is nothing to go back to. */}
+				{modified ? (
+					<button
+						type="button"
+						className={styles.sliderReset}
+						aria-label={`${tc("actions.resetToDefault")}: ${label}`}
+						title={tc("actions.resetToDefault")}
+						disabled={disabled}
+						onClick={reset}
+					>
+						<RotateCcw size={12} aria-hidden="true" />
+					</button>
 				) : null}
 			</div>
 			{/* The visible label is a <span>, not a <label htmlFor>, so without this the
@@ -4083,8 +4236,11 @@ export function SliderCell({
 				title={hint}
 				style={{ "--slider-pct": `${pct}%` } as CSSProperties}
 				onChange={(e) => onChange(Number(e.target.value))}
+				// A mouse released off the slider needs nothing more: the browser captures a range
+				// drag, so its mouseup still lands here. A touch the system cancels ends it too.
 				onMouseUp={onCommit}
 				onTouchEnd={onCommit}
+				onTouchCancel={onCommit}
 				onKeyUp={onCommit}
 			/>
 		</div>

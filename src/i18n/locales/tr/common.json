@@ -4,6 +4,7 @@
 		"save": "Kaydet",
 		"delete": "Sil",
 		"close": "Kapat",
+		"resetToDefault": "Varsayılana sıfırla",
 		"share": "Paylaş",
 		"done": "Tamam",
 		"open": "Aç",
@@ -47,7 +48,8 @@
 		"unhide": "Tümünü Göster",
 		"saveDiagnostics": "Teşhis Verilerini Kaydet",
 		"starOnGithub": "GitHub'da yıldız ver",
-		"permissions": "İzinler…"
+		"permissions": "İzinler…",
+		"closeNotification": "Bildirimi kapat"
 	},
 	"updates": {
 		"available": "OpenScreen {{latestVersion}} kullanılabilir. Mevcut sürümünüz {{currentVersion}}.",

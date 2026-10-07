@@ -4,6 +4,7 @@
 		"save": "Lưu",
 		"delete": "Xóa",
 		"close": "Đóng",
+		"resetToDefault": "Đặt lại về mặc định",
 		"share": "Chia sẻ",
 		"done": "Hoàn tất",
 		"open": "Mở",
@@ -47,7 +48,8 @@
 		"unhide": "Hiển thị tất cả",
 		"saveDiagnostics": "Lưu thông tin chẩn đoán",
 		"starOnGithub": "Gắn sao trên GitHub",
-		"permissions": "Quyền…"
+		"permissions": "Quyền…",
+		"closeNotification": "Đóng thông báo"
 	},
 	"updates": {
 		"available": "Đã có OpenScreen {{latestVersion}}. Bạn đang dùng phiên bản {{currentVersion}}.",

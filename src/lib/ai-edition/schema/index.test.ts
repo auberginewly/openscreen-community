@@ -11,6 +11,7 @@ import {
 	documentSchema,
 	ensureDocument,
 	legacyEditorSchema,
+	parseDocumentFile,
 	rangeSchema,
 	timelineSchema,
 	trimRangeSchema,
@@ -178,6 +179,40 @@ describe("axcut-schema v8", () => {
 			zIndex: 1,
 		});
 		expect(region.style.lastBackgroundColor).toBe("#3b82f6");
+	});
+
+	it("reads a text size into its bound instead of refusing the project", () => {
+		const sizeOf = (fontSize: number) =>
+			annotationRegionSchema.parse({
+				id: "ann_1",
+				startMs: 0,
+				endMs: 1500,
+				type: "text",
+				content: "hello",
+				position: { x: 4, y: 86 },
+				size: { width: 92, height: 12 },
+				style: { fontSize },
+				zIndex: 1,
+			}).style.fontSize;
+		// 0 is what an emptied size field used to store: it opens as the smallest text.
+		expect([sizeOf(0), sizeOf(24), sizeOf(500)]).toEqual([8, 24, 200]);
+	});
+
+	it("opens an arrow drawn against the frame's edge, whose box starts before it", () => {
+		const at = (type: "figure" | "text", x: number) => () =>
+			annotationRegionSchema.parse({
+				id: "ann_1",
+				startMs: 0,
+				endMs: 1500,
+				type,
+				position: { x, y: -5 },
+				size: { width: 30, height: 53 },
+				style: {},
+				zIndex: 1,
+			});
+		// A right arrow with a 6 px stroke, dragged to the left edge (`arrowBox`).
+		expect(at("figure", -17)().position).toEqual({ x: -17, y: -5 });
+		expect(at("text", -17)).toThrow("position must be at least 0");
 	});
 
 	it("zoomRegionSchema rejects unknown depths", () => {
@@ -1059,6 +1094,33 @@ describe("audio tracks (issue #350)", () => {
 		expect(track.endMs).toBeGreaterThan(track.startMs);
 	});
 
+	it("lays a new music bed down under the voice, eased in and out", () => {
+		// Imported music at 0 dB with hard edges is what buried the narration; a new bed
+		// starts at -18 dB with one-second ramps.
+		const bed = createAudioTrack({ assetId: "asset_1", durationSec: 60 });
+		expect(bed.kind).toBe("music");
+		expect([bed.gainDb, bed.fadeInMs, bed.fadeOutMs]).toEqual([-18, 1000, 1000]);
+		// A voiceover is voice: the export levels it, so it starts flat.
+		const take = createAudioTrack({ assetId: "asset_1", durationSec: 5, kind: "voiceover" });
+		expect([take.gainDb, take.fadeInMs, take.fadeOutMs]).toEqual([0, 0, 0]);
+	});
+
+	it("leaves a stored bed at the level its author set", () => {
+		// The new defaults are for NEW tracks. A track saved before them, even one that
+		// omits the fields, parses exactly as it did.
+		const {
+			gainDb: _gain,
+			fadeInMs: _in,
+			fadeOutMs: _out,
+			...stored
+		} = createAudioTrack({
+			assetId: "asset_1",
+			durationSec: 60,
+		});
+		expect(audioTrackSchema.parse(stored)).toMatchObject({ gainDb: 0, fadeInMs: 0, fadeOutMs: 0 });
+		expect(audioTrackSchema.parse({ ...stored, gainDb: -3 }).gainDb).toBe(-3);
+	});
+
 	it("defaults audioTracks to [] when a stored document omits the key", () => {
 		// A document written before issue #350 has no `audioTracks`; the defaulted
 		// array must fill in so older files load unchanged (no schemaVersion bump).
@@ -1110,5 +1172,76 @@ describe("v7 -> v8 default ratio pin", () => {
 		const fresh = createEmptyDocument({ projectId: "p", title: "t" });
 		expect(upgradeV7DocumentToV8(fresh)).toBe(fresh);
 		expect(fresh.legacyEditor).toBeNull();
+	});
+});
+
+describe("zoom click impact lifted to the cursor setting", () => {
+	const doc = (zoomRanges: unknown[], legacyEditor: Record<string, unknown> | null = null) => ({
+		...createEmptyDocument({ projectId: "p", title: "t" }),
+		zoomRanges,
+		legacyEditor,
+	});
+	const zoom = (extra: Record<string, unknown> = {}) => ({
+		id: "z",
+		startMs: 0,
+		endMs: 1000,
+		depth: 3,
+		focus: { cx: 0.5, cy: 0.5 },
+		rotationPreset: "left",
+		...extra,
+	});
+	const load = (raw: unknown) => documentSchema.parse(migrateRawDocumentToCurrent(raw));
+
+	it("turns the cursor setting on when any zoom had it, and drops the zoom's key", () => {
+		const out = load(doc([zoom(), zoom({ id: "y", clickImpact: true })], { padding: 20 }));
+		expect(out.legacyEditor).toEqual({ padding: 20, cursorClickImpact: true });
+		expect(out.zoomRanges.every((z) => !("clickImpact" in z))).toBe(true);
+	});
+
+	it("keeps a cursor setting the document already states", () => {
+		const out = load(doc([zoom({ clickImpact: true })], { cursorClickImpact: false }));
+		expect(out.legacyEditor).toEqual({ cursorClickImpact: false });
+	});
+
+	it("leaves a document without it untouched", () => {
+		const raw = doc([zoom()]);
+		expect(migrateRawDocumentToCurrent(raw)).toBe(raw);
+	});
+});
+
+// --- follow-cursor -> orbit : the orbit camera gains a manual mode ---------------------------
+
+describe("follow-cursor zooms read as orbits under auto focus", () => {
+	const zoom = (extra: Record<string, unknown>) => ({
+		id: "z",
+		startMs: 0,
+		endMs: 1000,
+		depth: 3,
+		focus: { cx: 0.2, cy: 0.7 },
+		...extra,
+	});
+	const docWith = (zoomRanges: unknown[]) => ({
+		...createEmptyDocument({ projectId: "p", title: "t" }),
+		zoomRanges,
+	});
+
+	it("keeps them following the cursor, whatever focus mode they stored", () => {
+		const doc = parseDocumentFile(
+			docWith([
+				zoom({ id: "manual", rotationPreset: "follow-cursor", focusMode: "manual" }),
+				zoom({ id: "unset", rotationPreset: "follow-cursor" }),
+				zoom({ id: "left", rotationPreset: "left" }),
+			]),
+		);
+		expect(doc.zoomRanges.map((z) => [z.id, z.rotationPreset, z.focusMode])).toEqual([
+			["manual", "orbit", "auto"],
+			["unset", "orbit", "auto"],
+			["left", "left", undefined],
+		]);
+	});
+
+	it("leaves an orbit set to manual alone, so a second load changes nothing", () => {
+		const manualOrbit = docWith([zoom({ rotationPreset: "orbit", focusMode: "manual" })]);
+		expect(migrateRawDocumentToCurrent(manualOrbit)).toBe(manualOrbit);
 	});
 });

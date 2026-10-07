@@ -1,25 +1,37 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom";
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { EditorDialogsProvider } from "@/contexts/EditorDialogsContext";
 import { createEmptyDocument } from "@/lib/ai-edition/schema";
-import { useProjectStore } from "@/lib/ai-edition/store/projectStore";
+import {
+	DOCUMENT_SAVES_WAIT_TIMEOUT_MS,
+	useProjectStore,
+} from "@/lib/ai-edition/store/projectStore";
 import { clearHistory, undo } from "@/lib/ai-edition/store/undo";
 import { past } from "@/lib/ai-edition/store/undoStack";
 import { ChatStripPanel } from "./LeftPanel";
 
-const { chatRun, chatSelectSession, chatSetEditStatus, save, info, warning, error } = vi.hoisted(
-	() => ({
-		chatRun: vi.fn(),
-		chatSelectSession: vi.fn(),
-		chatSetEditStatus: vi.fn(),
-		save: vi.fn(),
-		info: vi.fn(),
-		warning: vi.fn(),
-		error: vi.fn(),
-	}),
-);
+const {
+	chatRun,
+	chatListSessions,
+	chatSelectSession,
+	chatSetEditStatus,
+	save,
+	info,
+	warning,
+	error,
+} = vi.hoisted(() => ({
+	chatRun: vi.fn(),
+	chatListSessions: vi.fn(),
+	chatSelectSession: vi.fn(),
+	chatSetEditStatus: vi.fn(),
+	save: vi.fn(),
+	info: vi.fn(),
+	warning: vi.fn(),
+	error: vi.fn(),
+}));
 
 vi.mock("@/native/client", () => ({
 	nativeBridgeClient: {
@@ -28,9 +40,7 @@ vi.mock("@/native/client", () => ({
 				config: { provider: "openai", model: "gpt-4o" },
 				connectedProviders: ["openai"],
 			}),
-			chatListSessions: async () => [
-				{ id: "session-854", title: "Review", messageCount: 0, createdAt: "2026-09-27T00:00:00Z" },
-			],
+			chatListSessions: (...args: unknown[]) => chatListSessions(...args),
 			chatSelectSession: (...args: unknown[]) => chatSelectSession(...args),
 			chatBudget: async () => null,
 			chatRun: (...args: unknown[]) => chatRun(...args),
@@ -66,6 +76,11 @@ beforeEach(() => {
 		dirty: false,
 	});
 	chatRun.mockReset();
+	chatListSessions
+		.mockReset()
+		.mockResolvedValue([
+			{ id: "session-854", title: "Review", messageCount: 0, createdAt: "2026-09-27T00:00:00Z" },
+		]);
 	chatSelectSession.mockReset().mockResolvedValue({
 		id: "session-854",
 		projectId: "project-854",
@@ -108,9 +123,11 @@ async function sendTurn(withEdit = true) {
 		document: withEdit ? { ...before, project: { ...before.project, title: "Agent" } } : undefined,
 	});
 	const view = render(
-		<EditorDialogsProvider>
-			<ChatStripPanel />
-		</EditorDialogsProvider>,
+		<TooltipProvider>
+			<EditorDialogsProvider>
+				<ChatStripPanel />
+			</EditorDialogsProvider>
+		</TooltipProvider>,
 	);
 	await waitFor(() => expect(view.getByPlaceholderText("chat.composerPlaceholder")).toBeEnabled());
 	fireEvent.change(view.getByPlaceholderText("chat.composerPlaceholder"), {
@@ -122,6 +139,92 @@ async function sendTurn(withEdit = true) {
 }
 
 describe("chat turn review", () => {
+	it("keeps a late proposal in the session that requested it", async () => {
+		chatListSessions.mockResolvedValue([
+			{ id: "session-854", title: "Review", messageCount: 0, createdAt: "2026-09-27T00:00:00Z" },
+			{
+				id: "session-other",
+				title: "Other chat",
+				messageCount: 0,
+				createdAt: "2026-09-27T00:00:00Z",
+			},
+		]);
+		const messageId = `late-854-${sequence}`;
+		const result = {
+			success: true,
+			assistantMessage: {
+				id: messageId,
+				role: "assistant",
+				content: "Late proposal",
+				createdAt: "2026-09-27T00:01:00Z",
+				editStatus: "proposed",
+			},
+			document: { ...before, project: { ...before.project, title: "Agent" } },
+		};
+		let resolveTurn: ((value: typeof result) => void) | undefined;
+		chatRun.mockImplementationOnce(
+			() =>
+				new Promise((resolve) => {
+					resolveTurn = resolve;
+				}),
+		);
+		const view = render(
+			<TooltipProvider>
+				<EditorDialogsProvider>
+					<ChatStripPanel />
+				</EditorDialogsProvider>
+			</TooltipProvider>,
+		);
+		await waitFor(() =>
+			expect(view.getByPlaceholderText("chat.composerPlaceholder")).toBeEnabled(),
+		);
+		fireEvent.change(view.getByPlaceholderText("chat.composerPlaceholder"), {
+			target: { value: "edit" },
+		});
+		fireEvent.click(view.getByRole("button", { name: "chat.send" }));
+		await waitFor(() => expect(chatRun).toHaveBeenCalledOnce());
+		chatSelectSession.mockResolvedValue({
+			id: "session-other",
+			projectId: "project-854",
+			title: "Other chat",
+			createdAt: "2026-09-27T00:00:00Z",
+			messages: [
+				{
+					id: "other-message",
+					role: "assistant",
+					content: "Other conversation",
+					createdAt: "2026-09-27T00:00:00Z",
+				},
+			],
+		});
+		fireEvent.click(view.getByRole("button", { name: "chat.history" }));
+		fireEvent.click(view.getByText("Other chat"));
+		await waitFor(() => expect(view.getByText("Other conversation")).toBeInTheDocument());
+		await act(async () => {
+			resolveTurn?.(result);
+		});
+		expect(view.queryByText("Late proposal")).toBeNull();
+		expect(view.queryByRole("button", { name: "chat.applyProposedEdits" })).toBeNull();
+		chatSelectSession.mockResolvedValue({
+			id: "session-854",
+			projectId: "project-854",
+			title: "Review",
+			createdAt: "2026-09-27T00:00:00Z",
+			messages: [result.assistantMessage],
+		});
+		fireEvent.click(view.getByRole("button", { name: "chat.history" }));
+		fireEvent.click(view.getByRole("button", { name: /Review/ }));
+		await waitFor(() => expect(view.getByText("Late proposal")).toBeInTheDocument());
+		fireEvent.click(view.getByRole("button", { name: "chat.applyProposedEdits" }));
+		await waitFor(() =>
+			expect(chatSetEditStatus).toHaveBeenCalledWith(
+				"project-854",
+				"session-854",
+				messageId,
+				"applied",
+			),
+		);
+	});
 	it("shows both proposed tool edits without saving, then applies one undoable project change", async () => {
 		const { view, messageId } = await sendTurn();
 		expect(view.getByText("chat.editStatus.proposed")).toBeInTheDocument();
@@ -176,6 +279,47 @@ describe("chat turn review", () => {
 		expect(past).toHaveLength(0);
 	});
 
+	it("retains the proposal and re-enables Apply after waiting for a save times out", async () => {
+		const { view, messageId } = await sendTurn();
+		vi.useFakeTimers();
+		let release: (() => void) | undefined;
+		save.mockImplementationOnce(async () => {
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { success: false, error: "EACCES" };
+		});
+		const earlier = useProjectStore.getState().saveDocument(before, { history: false });
+		try {
+			fireEvent.click(view.getByRole("button", { name: "chat.applyProposedEdits" }));
+			await act(async () => {
+				await vi.advanceTimersByTimeAsync(DOCUMENT_SAVES_WAIT_TIMEOUT_MS);
+			});
+			expect(view.getByText("chat.editStatus.proposed")).toBeInTheDocument();
+			expect(view.getByRole("button", { name: "chat.applyProposedEdits" })).toBeEnabled();
+			expect(chatSetEditStatus).not.toHaveBeenCalled();
+			expect(info).toHaveBeenCalledWith("chat.waitingForSave");
+			release?.();
+			await act(async () => {
+				await earlier;
+			});
+			await act(async () => {
+				fireEvent.click(view.getByRole("button", { name: "chat.applyProposedEdits" }));
+			});
+			expect(view.getByText("chat.editStatus.applied")).toBeInTheDocument();
+			expect(chatSetEditStatus).toHaveBeenCalledWith(
+				"project-854",
+				"session-854",
+				messageId,
+				"applied",
+			);
+		} finally {
+			release?.();
+			await earlier;
+			vi.useRealTimers();
+		}
+	});
+
 	it("shows a text-only reply with no approval prompt", async () => {
 		const { view } = await sendTurn(false);
 		expect(view.queryByRole("button", { name: "chat.applyProposedEdits" })).toBeNull();
@@ -201,9 +345,11 @@ describe("chat turn review", () => {
 			],
 		});
 		const reopened = render(
-			<EditorDialogsProvider>
-				<ChatStripPanel />
-			</EditorDialogsProvider>,
+			<TooltipProvider>
+				<EditorDialogsProvider>
+					<ChatStripPanel />
+				</EditorDialogsProvider>
+			</TooltipProvider>,
 		);
 		await waitFor(() =>
 			expect(reopened.getByRole("button", { name: "chat.applyProposedEdits" })).toBeEnabled(),
@@ -241,9 +387,11 @@ describe("chat turn review", () => {
 			],
 		});
 		const reopened = render(
-			<EditorDialogsProvider>
-				<ChatStripPanel />
-			</EditorDialogsProvider>,
+			<TooltipProvider>
+				<EditorDialogsProvider>
+					<ChatStripPanel />
+				</EditorDialogsProvider>
+			</TooltipProvider>,
 		);
 		await waitFor(() =>
 			expect(reopened.getByRole("button", { name: "chat.discardProposedEdits" })).toBeDisabled(),
@@ -271,9 +419,11 @@ describe("chat turn review", () => {
 			],
 		});
 		const view = render(
-			<EditorDialogsProvider>
-				<ChatStripPanel />
-			</EditorDialogsProvider>,
+			<TooltipProvider>
+				<EditorDialogsProvider>
+					<ChatStripPanel />
+				</EditorDialogsProvider>
+			</TooltipProvider>,
 		);
 		await waitFor(() =>
 			expect(view.getByRole("button", { name: "chat.applyProposedEdits" })).toBeDisabled(),

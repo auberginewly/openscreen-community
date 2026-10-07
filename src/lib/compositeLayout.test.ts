@@ -1,18 +1,29 @@
 import { describe, expect, it } from "vitest";
 import {
+	autoFormatAspect,
 	autoFrameAspect,
 	computeCameraFullscreenRect,
 	computeCompositeLayout,
 	isWebcamBlockLayout,
 	paddedContentSize,
 	paddingFit,
+	type RenderRect,
 	resolveWebcamReactiveZoom,
 	restingCompositionAspect,
 	type Size,
 	type StyledRenderRect,
 	type WebcamLayoutPreset,
 } from "./compositeLayout";
-import type { WebcamAnchor } from "./projectDefaults";
+import { frameFootprint, frameUnit, type Insets } from "./frameFootprint";
+import { WEBCAM_SIZE_MAX, WEBCAM_SIZE_MIN, type WebcamAnchor } from "./projectDefaults";
+
+/** A rect grown by insets: the screen box plus what a frame draws around it. */
+const expand = (r: RenderRect, [left, top, right, bottom]: Insets): RenderRect => ({
+	x: r.x - left,
+	y: r.y - top,
+	width: r.width + left + right,
+	height: r.height + top + bottom,
+});
 
 describe("resolveWebcamReactiveZoom", () => {
 	it("honours the stored setting for picture-in-picture", () => {
@@ -70,7 +81,7 @@ describe("computeCompositeLayout", () => {
 		});
 
 		const refDim = Math.sqrt(1280 * 720);
-		const defaultFraction = 25 / 100; // DEFAULT_WEBCAM_SIZE_PRESET = 25
+		const defaultFraction = 40 / 100; // DEFAULT_WEBCAM_SIZE_PRESET = 40
 		expect(layout).not.toBeNull();
 		expect(layout!.webcamRect).not.toBeNull();
 		expect(layout!.webcamRect!.width).toBeLessThanOrEqual(Math.round(refDim * defaultFraction) + 1);
@@ -154,7 +165,7 @@ describe("computeCompositeLayout", () => {
 		expect(medium!.webcamRect!.height).toBeLessThan(large!.webcamRect!.height);
 	});
 
-	it("clamps webcamSizePreset to the valid range (10–50)", () => {
+	it("clamps webcamSizePreset to the slider's range", () => {
 		const canvasSize = { width: 1920, height: 1080 };
 		const screenSize = { width: 1920, height: 1080 };
 		const webcamSize = { width: 1280, height: 720 };
@@ -163,7 +174,7 @@ describe("computeCompositeLayout", () => {
 			canvasSize,
 			screenSize,
 			webcamSize,
-			webcamSizePreset: 10,
+			webcamSizePreset: WEBCAM_SIZE_MIN,
 		});
 		const belowMin = computeCompositeLayout({
 			canvasSize,
@@ -175,7 +186,7 @@ describe("computeCompositeLayout", () => {
 			canvasSize,
 			screenSize,
 			webcamSize,
-			webcamSizePreset: 50,
+			webcamSizePreset: WEBCAM_SIZE_MAX,
 		});
 		const aboveMax = computeCompositeLayout({
 			canvasSize,
@@ -428,6 +439,115 @@ describe("computeCompositeLayout", () => {
 		expect(cover("dual-frame", null)).toBe(false);
 	});
 
+	// ─── block layouts: the frame is the screen's container ────────────────────
+
+	// There the frame stays at rest around the screen while the footage zooms inside it (`ScreenMask`),
+	// so the block lays out the frame, not just the screen: the camera lines up with the frame's
+	// body, and keeps the gap to everything the frame draws, a laptop's deck or a monitor's stand.
+	// Two pixels: every edge is snapped to a whole pixel, the frame measured on the snapped screen.
+	const near = (actual: number, expected: number, tolerance = 2) =>
+		expect(Math.abs(actual - expected)).toBeLessThanOrEqual(tolerance);
+
+	for (const layoutPreset of ["dual-frame", "vertical-stack"] as const) {
+		for (const frame of ["window", "laptop", "phone", "monitor"] as const) {
+			for (const scene of SCENES) {
+				it(`${layoutPreset} under a ${frame} in scene ${scene.label}: the camera lines up with the frame and clears it`, () => {
+					const padded = paddedContentSize(scene.size, 50, false);
+					const layout = computeCompositeLayout({
+						canvasSize: scene.size,
+						maxContentSize: padded,
+						screenSize: { width: 1920, height: 1080 },
+						webcamSize: CAM,
+						layoutPreset,
+						frame,
+					})!;
+					const screen = layout.screenRect;
+					const cam = layout.webcamRect!;
+					const { body, outer } = frameFootprint(frame, screen, frameUnit(screen, scene.size));
+					const shell = expand(screen, body);
+					const drawn = expand(screen, outer);
+
+					expect(screen.width / screen.height).toBeCloseTo(16 / 9, 1);
+					expect(layout.screenCover).toBe(true);
+					const gap = 0.02 * screen.width;
+					if (layoutPreset === "dual-frame") {
+						near(cam.y, shell.y);
+						near(cam.height, shell.height);
+						near(cam.x - (drawn.x + drawn.width), gap);
+					} else {
+						near(cam.x, shell.x);
+						near(cam.width, shell.width);
+						near(cam.y - (drawn.y + drawn.height), gap);
+					}
+
+					// Frame and camera together: contained in the padded area, touching it on one
+					// axis, and centred in the scene.
+					const left = Math.min(drawn.x, cam.x);
+					const top = Math.min(drawn.y, cam.y);
+					const right = Math.max(drawn.x + drawn.width, cam.x + cam.width);
+					const bottom = Math.max(drawn.y + drawn.height, cam.y + cam.height);
+					expect(right - left).toBeLessThanOrEqual(padded.width + 2);
+					expect(bottom - top).toBeLessThanOrEqual(padded.height + 2);
+					expect(
+						Math.min(padded.width - (right - left), padded.height - (bottom - top)),
+					).toBeLessThanOrEqual(2);
+					near(left, scene.size.width - right, 2);
+					near(top, scene.size.height - bottom, 2);
+				});
+			}
+		}
+	}
+
+	it("lays a block out exactly as before without a frame", () => {
+		for (const layoutPreset of ["dual-frame", "vertical-stack"] as const) {
+			for (const scene of SCENES) {
+				const args = {
+					canvasSize: scene.size,
+					maxContentSize: paddedContentSize(scene.size, 50, false),
+					screenSize: { width: 1920, height: 1080 },
+					webcamSize: CAM,
+					layoutPreset,
+				};
+				expect(computeCompositeLayout({ ...args, frame: "none" })).toEqual(
+					computeCompositeLayout(args),
+				);
+			}
+		}
+	});
+
+	// Everywhere else the frame zooms and tilts with the screen, but at rest the padding is
+	// measured from its outer edge: at 0% the whole frame touches the scene, never past it, and
+	// a lopsided one (a window's bar, a monitor's stand) is centred as a whole.
+	for (const layoutPreset of ["picture-in-picture", "no-webcam"] as const) {
+		for (const frame of ["window", "laptop", "phone", "monitor"] as const) {
+			for (const scene of SCENES) {
+				it(`${layoutPreset} under a ${frame} in scene ${scene.label}: the whole frame fits and centres`, () => {
+					const padded = paddedContentSize(scene.size, 0, false);
+					const layout = computeCompositeLayout({
+						canvasSize: scene.size,
+						maxContentSize: padded,
+						screenSize: { width: 1920, height: 1080 },
+						webcamSize: CAM,
+						layoutPreset,
+						frame,
+					})!;
+					const screen = layout.screenRect;
+					const { outer } = frameFootprint(frame, screen, frameUnit(screen, scene.size));
+					const drawn = expand(screen, outer);
+
+					expect(screen.width / screen.height).toBeCloseTo(16 / 9, 1);
+					expect(drawn.width).toBeLessThanOrEqual(padded.width + 2);
+					expect(drawn.height).toBeLessThanOrEqual(padded.height + 2);
+					expect(
+						Math.min(padded.width - drawn.width, padded.height - drawn.height),
+					).toBeLessThanOrEqual(2);
+					near(drawn.x, scene.size.width - (drawn.x + drawn.width));
+					near(drawn.y, scene.size.height - (drawn.y + drawn.height));
+				});
+			}
+		}
+	}
+
 	it("forces circular and square masks to use square dimensions", () => {
 		const circularLayout = computeCompositeLayout({
 			canvasSize: { width: 1920, height: 1080 },
@@ -460,7 +580,7 @@ describe("computeCompositeLayout", () => {
 
 	// A fraction of half the short side: the same value is the same shape at any size.
 	it("rounds by the roundness, and a fully round square is a circle", () => {
-		const circle = pipAt({ webcamMaskShape: "square", webcamRoundness: 1 });
+		const circle = pipAt({ webcamMaskShape: "square", webcamRoundness: 1, webcamSizePreset: 25 });
 		expect(circle.width).toBe(circle.height);
 		expect(circle.borderRadius).toBe(circle.width / 2);
 		expect(pipAt({ webcamRoundness: 0 }).borderRadius).toBe(0);
@@ -475,7 +595,7 @@ describe("computeCompositeLayout", () => {
 	// keeps the same distance from the border, whatever the camera's size.
 	it("keeps the same margin from the border at every anchor", () => {
 		const margin = Math.round(1080 * 0.02);
-		for (const size of [10, 35]) {
+		for (const size of [WEBCAM_SIZE_MIN, WEBCAM_SIZE_MAX]) {
 			const at = (webcamAnchor: WebcamAnchor) => pipAt({ webcamAnchor, webcamSizePreset: size });
 			expect(at("top-left")).toMatchObject({ x: margin, y: margin });
 			const br = at("bottom-right");
@@ -492,8 +612,10 @@ describe("computeCompositeLayout", () => {
 		}
 	});
 
-	it("caps the camera at 35% of the short side", () => {
-		expect(pipAt({ webcamSizePreset: 50 }).height).toBe(pipAt({ webcamSizePreset: 35 }).height);
+	// The size is the camera's long side: a 16:9 camera at the 60% cap is 648 x 365 in 1080p.
+	it("caps the camera at 60% of the short side", () => {
+		expect(pipAt({ webcamSizePreset: WEBCAM_SIZE_MAX })).toMatchObject({ width: 648, height: 365 });
+		expect(pipAt({ webcamSizePreset: 80 }).height).toBe(365);
 	});
 });
 
@@ -531,9 +653,10 @@ describe("Auto frame", () => {
 		);
 	});
 
-	// The whole contract: a frame shaped by `autoFrameAspect`, padded by `paddedContentSize`
+	// The whole contract: a frame shaped by `autoFormatAspect`, padded by `paddedContentSize`
 	// and laid out by `computeCompositeLayout` gives the composition back, unbent, with the
-	// same margin on all four sides. Preview and scene both go through exactly these three.
+	// same margin on all four sides, measured from everything a device frame draws. Preview and
+	// scene both go through exactly these three.
 	const CASES = [
 		{ label: "16:9 screen", screen: { width: 1920, height: 1080 }, preset: "no-webcam" },
 		{
@@ -549,36 +672,43 @@ describe("Auto frame", () => {
 	] as const;
 	for (const c of CASES) {
 		for (const padding of [0, 30, 50, 100]) {
-			it(`${c.label}, padding ${padding}%: even border, nothing bent`, () => {
-				const aspect = autoFrameAspect(restingCompositionAspect(c.screen, c.preset), padding);
-				const canvas =
-					aspect >= 1
-						? { width: 1920, height: Math.round(1920 / aspect) }
-						: { width: Math.round(1920 * aspect), height: 1920 };
-				const layout = computeCompositeLayout({
-					canvasSize: canvas,
-					maxContentSize: paddedContentSize(canvas, padding, true),
-					screenSize: c.screen,
-					webcamSize: c.preset === "no-webcam" ? null : { width: 1280, height: 720 },
-					layoutPreset: c.preset,
-				})!;
-				const block = isWebcamBlockLayout(c.preset);
-				const rects = block ? [layout.screenRect, layout.webcamRect!] : [layout.screenRect];
-				const border = ((1 - paddingFit(padding)) / 2) * Math.min(canvas.width, canvas.height);
-				const sides = [
-					Math.min(...rects.map((r) => r.x)),
-					Math.min(...rects.map((r) => r.y)),
-					canvas.width - Math.max(...rects.map((r) => r.x + r.width)),
-					canvas.height - Math.max(...rects.map((r) => r.y + r.height)),
-				];
-				for (const side of sides) expect(Math.abs(side - border)).toBeLessThanOrEqual(1.5);
-				expect(layout.screenRect.width / layout.screenRect.height).toBeCloseTo(
-					c.screen.width / c.screen.height,
-					1,
-				);
-				if (block) {
-					const cam = layout.webcamRect!;
-					expect(cam.width / cam.height).toBeCloseTo(1, 1);
+			it(`${c.label}, padding ${padding}%: even border around every frame, nothing bent`, () => {
+				for (const frame of ["none", "window", "laptop", "phone", "monitor"] as const) {
+					const aspect = autoFormatAspect(c.screen, c.preset, frame, padding);
+					const canvas =
+						aspect >= 1
+							? { width: 1920, height: Math.round(1920 / aspect) }
+							: { width: Math.round(1920 * aspect), height: 1920 };
+					const layout = computeCompositeLayout({
+						canvasSize: canvas,
+						maxContentSize: paddedContentSize(canvas, padding, true),
+						screenSize: c.screen,
+						webcamSize: c.preset === "no-webcam" ? null : { width: 1280, height: 720 },
+						layoutPreset: c.preset,
+						frame,
+					})!;
+					const screen = layout.screenRect;
+					const drawn = expand(
+						screen,
+						frameFootprint(frame, screen, frameUnit(screen, canvas)).outer,
+					);
+					const block = isWebcamBlockLayout(c.preset);
+					const rects = block ? [drawn, layout.webcamRect!] : [drawn];
+					const border = ((1 - paddingFit(padding)) / 2) * Math.min(canvas.width, canvas.height);
+					const sides = [
+						Math.min(...rects.map((r) => r.x)),
+						Math.min(...rects.map((r) => r.y)),
+						canvas.width - Math.max(...rects.map((r) => r.x + r.width)),
+						canvas.height - Math.max(...rects.map((r) => r.y + r.height)),
+					];
+					for (const side of sides) {
+						expect(Math.abs(side - border), `${frame}: ${sides}`).toBeLessThanOrEqual(2);
+					}
+					expect(screen.width / screen.height).toBeCloseTo(c.screen.width / c.screen.height, 1);
+					if (block) {
+						const cam = layout.webcamRect!;
+						expect(cam.width / cam.height, frame).toBeCloseTo(1, 1);
+					}
 				}
 			});
 		}

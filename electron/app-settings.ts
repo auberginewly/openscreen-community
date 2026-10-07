@@ -1,5 +1,11 @@
 import { readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import {
+	DEFAULT_WEBCAM_QUALITY,
+	WEBCAM_QUALITY_IDS,
+	type WebcamQualityId,
+	webcamQualityFrom,
+} from "../src/hooks/webcamCaptureTarget";
 import type { CursorCaptureMode } from "../src/lib/recordingSession";
 
 export interface RecordingPreferences {
@@ -9,8 +15,20 @@ export interface RecordingPreferences {
 	camEnabled: boolean;
 	camDeviceId: string | null;
 	camDeviceName: string | null;
+	/** Capture resolution for the camera. See WEBCAM_QUALITY_PRESETS. */
+	camQuality: WebcamQualityId;
 	systemAudioEnabled: boolean;
 	cursorCaptureMode: CursorCaptureMode;
+	/** Display captures on macOS and Windows. Opt-in: on Windows the icons also leave the real desktop while recording. */
+	hideDesktopIcons: boolean;
+	/**
+	 * Whether the editor decorates a fresh take with automatic zooms when it imports it.
+	 *
+	 * Absent from a settings file written before this preference existed, which is why
+	 * `parseRecording` reads a missing key as the default rather than as "off": the
+	 * behaviour it gates has been on for every such installation.
+	 */
+	autoZoomEnabled: boolean;
 }
 
 export const DEFAULT_RECORDING_PREFERENCES: RecordingPreferences = {
@@ -20,8 +38,11 @@ export const DEFAULT_RECORDING_PREFERENCES: RecordingPreferences = {
 	camEnabled: false,
 	camDeviceId: null,
 	camDeviceName: null,
+	camQuality: DEFAULT_WEBCAM_QUALITY,
 	systemAudioEnabled: false,
 	cursorCaptureMode: "editable-overlay",
+	hideDesktopIcons: false,
+	autoZoomEnabled: true,
 };
 
 export interface RecordingSourceDescriptor {
@@ -88,6 +109,9 @@ function parseRecording(raw: RawSettings): RecordingPreferences {
 		camEnabled: bool(raw.camEnabled, DEFAULT_RECORDING_PREFERENCES.camEnabled),
 		camDeviceId: nullableString(raw.camDeviceId, DEFAULT_RECORDING_PREFERENCES.camDeviceId),
 		camDeviceName: nullableString(raw.camDeviceName, DEFAULT_RECORDING_PREFERENCES.camDeviceName),
+		// Unset in every settings file written before the camera had a quality
+		// setting, and `webcamQualityFrom` answers those with the default.
+		camQuality: webcamQualityFrom(raw.camQuality),
 		systemAudioEnabled: bool(
 			raw.systemAudioEnabled,
 			DEFAULT_RECORDING_PREFERENCES.systemAudioEnabled,
@@ -96,6 +120,8 @@ function parseRecording(raw: RawSettings): RecordingPreferences {
 			raw.cursorCaptureMode === "system" || raw.cursorCaptureMode === "editable-overlay"
 				? raw.cursorCaptureMode
 				: DEFAULT_RECORDING_PREFERENCES.cursorCaptureMode,
+		hideDesktopIcons: bool(raw.hideDesktopIcons, DEFAULT_RECORDING_PREFERENCES.hideDesktopIcons),
+		autoZoomEnabled: bool(raw.autoZoomEnabled, DEFAULT_RECORDING_PREFERENCES.autoZoomEnabled),
 	};
 }
 
@@ -140,7 +166,7 @@ function validateRecordingPatch(patch: Partial<RecordingPreferences>): void {
 	for (const [key, value] of Object.entries(patch)) {
 		if (!allowed.has(key)) throw new TypeError(`unknown recording preference: ${key}`);
 		if (value === undefined) continue;
-		if (key.endsWith("Enabled") && typeof value !== "boolean") {
+		if ((key.endsWith("Enabled") || key === "hideDesktopIcons") && typeof value !== "boolean") {
 			throw new TypeError(`${key} must be a boolean`);
 		}
 		if (
@@ -152,6 +178,12 @@ function validateRecordingPatch(patch: Partial<RecordingPreferences>): void {
 		}
 		if (key === "cursorCaptureMode" && value !== "system" && value !== "editable-overlay") {
 			throw new TypeError("cursorCaptureMode is invalid");
+		}
+		// Rejected here rather than coerced on read, so a bad write is a visible
+		// error at its source instead of a resolution that silently is not the
+		// one the caller asked for.
+		if (key === "camQuality" && !WEBCAM_QUALITY_IDS.includes(value as WebcamQualityId)) {
+			throw new TypeError("camQuality is invalid");
 		}
 	}
 }

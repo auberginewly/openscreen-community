@@ -6,7 +6,7 @@ import {
 	createAgentEditReview,
 	runAgentTurn,
 } from "./agentDocumentApply";
-import { useProjectStore } from "./projectStore";
+import { DOCUMENT_SAVES_WAIT_TIMEOUT_MS, useProjectStore } from "./projectStore";
 import { clearHistory, redo, undo } from "./undo";
 import { future, past } from "./undoStack";
 
@@ -95,6 +95,136 @@ describe("applyAgentDocumentIfCurrent", () => {
 
 		expect(useProjectStore.getState().document?.project.title).toBe("Before");
 		expect(useProjectStore.getState().dirty).toBe(false);
+	});
+
+	it("keeps a timed-out approval retryable after the earlier save settles", async () => {
+		vi.useFakeTimers();
+		const before = createEmptyDocument({ projectId: "project_1", title: "Before" });
+		const proposal = { ...before, project: { ...before.project, title: "Agent" } };
+		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		let release: (() => void) | undefined;
+		saveMock.mockImplementationOnce(async () => {
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { success: false, error: "EACCES" };
+		});
+		const earlier = useProjectStore.getState().saveDocument(before, { history: false });
+		const review = createAgentEditReview(() => applyAgentDocumentIfCurrent(proposal, 4));
+		try {
+			const applying = review.apply();
+			await vi.advanceTimersByTimeAsync(DOCUMENT_SAVES_WAIT_TIMEOUT_MS);
+			await expect(applying).resolves.toBe("proposed");
+			expect(review.applying).toBe(false);
+			expect(useProjectStore.getState().document).toBe(before);
+			release?.();
+			await earlier;
+			saveMock.mockImplementation(async (document) => ({ success: true, document }));
+			await expect(review.apply()).resolves.toBe("applied");
+			expect(saveMock).toHaveBeenCalledTimes(2);
+		} finally {
+			release?.();
+			await earlier;
+			vi.useRealTimers();
+		}
+	});
+
+	it("does not install an approved save over a newer live edit", async () => {
+		const before = createEmptyDocument({ projectId: "project_1", title: "Before" });
+		const proposal = { ...before, project: { ...before.project, title: "Agent" } };
+		const manual = { ...before, project: { ...before.project, title: "Manual" } };
+		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		let release: (() => void) | undefined;
+		saveMock.mockImplementationOnce(async (document) => {
+			await new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			return { success: true, document };
+		});
+		const applying = applyAgentDocumentIfCurrent(proposal, 4);
+		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+		useProjectStore.getState().setDocument(manual, { history: true });
+		release?.();
+		await expect(applying).resolves.toBe("save-failed");
+		expect(useProjectStore.getState().document).toBe(manual);
+		expect(past).toHaveLength(1);
+	});
+
+	it.each([
+		"approval-first",
+		"manual-first",
+	])("refuses an approval overtaken by a direct editor save (%s)", async (order) => {
+		const before = createEmptyDocument({ projectId: "project_1", title: "Before" });
+		const proposal = { ...before, project: { ...before.project, title: "Agent" } };
+		const manual = { ...before, project: { ...before.project, title: "Manual" } };
+		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		const releases: Array<() => void> = [];
+		saveMock.mockImplementation(async (document) => {
+			await new Promise<void>((resolve) => releases.push(resolve));
+			return { success: true, document };
+		});
+		const review = createAgentEditReview(() => applyAgentDocumentIfCurrent(proposal, 4));
+		const applying = review.apply();
+		await vi.waitFor(() => expect(releases).toHaveLength(1));
+		// Timeline and inspector actions save directly, without setDocument first.
+		const manualSave = useProjectStore.getState().saveDocument(manual, { history: true });
+		try {
+			if (order === "approval-first") {
+				releases[0]();
+				expect(useProjectStore.getState().document).toBe(before);
+				expect(past).toHaveLength(0);
+				releases[1]();
+				await manualSave;
+				await expect(applying).resolves.toBe("failed");
+			} else {
+				releases[1]();
+				await manualSave;
+				releases[0]();
+				await expect(applying).resolves.toBe("failed");
+			}
+			expect(review.status).toBe("failed");
+			expect(useProjectStore.getState().document?.project.title).toBe("Manual");
+			expect(past).toHaveLength(1);
+			expect(undo()).toBe(true);
+			expect(useProjectStore.getState().document?.project.title).toBe("Before");
+		} finally {
+			for (const release of releases) release();
+			await Promise.all([applying, manualSave]);
+		}
+	});
+
+	it("keeps a confirmed approval when the overlapping manual save fails", async () => {
+		const before = createEmptyDocument({ projectId: "project_1", title: "Before" });
+		const proposal = { ...before, project: { ...before.project, title: "Agent" } };
+		const manual = { ...before, project: { ...before.project, title: "Manual" } };
+		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		let releaseApproval: (() => void) | undefined;
+		let releaseManual: (() => void) | undefined;
+		saveMock
+			.mockImplementationOnce(async (document) => {
+				await new Promise<void>((resolve) => {
+					releaseApproval = resolve;
+				});
+				return { success: true, document };
+			})
+			.mockImplementationOnce(async () => {
+				await new Promise<void>((resolve) => {
+					releaseManual = resolve;
+				});
+				return { success: false, error: "ENOSPC" };
+			});
+		const review = createAgentEditReview(() => applyAgentDocumentIfCurrent(proposal, 4));
+		const applying = review.apply();
+		await vi.waitFor(() => expect(releaseApproval).toBeTypeOf("function"));
+		const manualSave = useProjectStore.getState().saveDocument(manual, { history: true });
+		releaseApproval?.();
+		releaseManual?.();
+		await expect(manualSave).resolves.toBe(false);
+		await expect(applying).resolves.toBe("applied");
+		expect(useProjectStore.getState().document?.project.title).toBe("Agent");
+		expect(past).toHaveLength(1);
+		expect(undo()).toBe(true);
+		expect(useProjectStore.getState().document?.project.title).toBe("Before");
 	});
 
 	it("leaves no undo step behind a rejected agent edit", async () => {

@@ -36,9 +36,11 @@ export function ModalShell({
 	open,
 	onClose,
 	closeOnEscape = true,
+	closeOnBackdrop = true,
 	title,
 	subtitle,
 	wide,
+	footer,
 	children,
 }: BaseModalProps & {
 	title: string;
@@ -47,6 +49,12 @@ export function ModalShell({
 	/** Off for a dialog that handles Escape itself — two listeners both fire for one
 	 *  keypress, and this one's `onClose` wins whatever order they registered in. */
 	closeOnEscape?: boolean;
+	/** Off while a stray click beside the card would throw away an edit not yet applied.
+	 *  Escape, Cancel and the close button still discard it: that is what they mean. */
+	closeOnBackdrop?: boolean;
+	/** The dialog's actions, kept out of the scrolling body so a short window never hides
+	 *  them: a click where an unseen Apply sat used to land on the backdrop. */
+	footer?: ReactNode;
 	children: ReactNode;
 }) {
 	const tc = useScopedT("common");
@@ -78,7 +86,11 @@ export function ModalShell({
 			aria-modal="true"
 			aria-labelledby="modal-title"
 		>
-			<div className={styles.modalBackdrop} aria-hidden onClick={onClose} />
+			<div
+				className={styles.modalBackdrop}
+				aria-hidden
+				onClick={closeOnBackdrop ? onClose : undefined}
+			/>
 			<div className={`${styles.modalCard} ${wide ? styles.wide : ""}`}>
 				<header className={styles.modalHead}>
 					<div>
@@ -96,6 +108,7 @@ export function ModalShell({
 					</button>
 				</header>
 				<div className={styles.modalBody}>{children}</div>
+				{footer ? <footer className={styles.modalFoot}>{footer}</footer> : null}
 			</div>
 		</div>
 	);
@@ -918,9 +931,48 @@ export function EditClipModal({
 		<ModalShell
 			open={open}
 			onClose={onClose}
+			closeOnBackdrop={!hasChanges}
 			title={t("editClipDialog.title")}
 			subtitle={assetMeta?.label ?? undefined}
 			wide
+			footer={
+				<div
+					style={{
+						display: "flex",
+						justifyContent: "space-between",
+						alignItems: "center",
+						paddingTop: 10,
+						borderTop: "1px solid var(--border-soft)",
+					}}
+				>
+					<button
+						type="button"
+						className={`${styles.btn} ${styles.btnSecondary}`}
+						onClick={handleReset}
+						disabled={!hasChanges}
+					>
+						{t("editClipDialog.reset")}
+					</button>
+					<div style={{ display: "flex", gap: 8 }}>
+						<button
+							type="button"
+							className={`${styles.btn} ${styles.btnSecondary}`}
+							onClick={onClose}
+						>
+							{tc("actions.cancel")}
+						</button>
+						<button
+							type="button"
+							className={`${styles.btn} ${styles.btnPrimary}`}
+							onClick={handleApply}
+							disabled={!hasChanges}
+						>
+							<Pencil size={14} />
+							{t("editClipDialog.apply")}
+						</button>
+					</div>
+				</div>
+			}
 		>
 			<div ref={cropFrameRef} style={previewBoxStyle(videoAspectRatio)}>
 				{cropPreviewSource ? (
@@ -1035,95 +1087,33 @@ export function EditClipModal({
 					<span>0:00.0</span>
 					<span>{formatSeconds(sourceDurationSec)}</span>
 				</div>
-				<div
-					ref={trackRef}
-					data-testid="edit-clip-trim-track"
-					style={{
-						position: "relative",
-						height: 32,
-						flexShrink: 0,
-						background: "var(--surface-2)",
-						borderRadius: "var(--r-sm)",
-					}}
-				>
-					{/* Dimmed, discarded head. Decoration only — see the tail below. */}
+				{/* The kept range is the timeline's clip card; the bare groove around it is the
+				    discarded head and tail. Nothing else is painted over the grips. */}
+				<div ref={trackRef} data-testid="edit-clip-trim-track" className={styles.editClipTrack}>
 					<div
+						className={`${styles.editClipRange}${activeEdge ? ` ${styles.editClipRangeDragging}` : ""}`}
 						style={{
-							position: "absolute",
-							inset: 0,
-							width: `${(draftStart / sourceDurationSec) * 100}%`,
-							background: "var(--overlay-dark)",
-							borderRadius: "var(--r-sm) 0 0 var(--r-sm)",
-							pointerEvents: "none",
-						}}
-					/>
-					<div
-						className={activeEdge ? styles.editClipRangeDragging : undefined}
-						style={{
-							position: "absolute",
-							top: 0,
-							bottom: 0,
 							left: `${(draftStart / sourceDurationSec) * 100}%`,
 							width: `${Math.max(0.5, (durationSec / sourceDurationSec) * 100)}%`,
-							background: "var(--accent-wash)",
-							border: "1px solid var(--accent)",
-							borderRadius: "var(--r-sm)",
 						}}
 					>
 						<button
 							type="button"
+							className={styles.editClipGrip}
+							data-edge="start"
 							onPointerDown={(e) => startDrag("start", e)}
 							aria-label={t("editClipDialog.adjustStart")}
 							title={t("editClipDialog.adjustStart")}
-							style={{
-								position: "absolute",
-								left: -6,
-								top: 0,
-								bottom: 0,
-								width: 12,
-								cursor: "ew-resize",
-								background: "var(--accent)",
-								border: 0,
-								borderRadius: 3,
-								padding: 0,
-							}}
 						/>
 						<button
 							type="button"
+							className={styles.editClipGrip}
+							data-edge="end"
 							onPointerDown={(e) => startDrag("end", e)}
 							aria-label={t("editClipDialog.adjustEnd")}
 							title={t("editClipDialog.adjustEnd")}
-							style={{
-								position: "absolute",
-								right: -6,
-								top: 0,
-								bottom: 0,
-								width: 12,
-								cursor: "ew-resize",
-								background: "var(--accent)",
-								border: 0,
-								borderRadius: 3,
-								padding: 0,
-							}}
 						/>
 					</div>
-					{/* Dimmed, discarded tail. It is painted after the selection, so it sits
-					    ABOVE the end handle that overhangs the selection's right edge by 6px:
-					    without pointer-events:none it swallows the grab as soon as the range is
-					    narrower than the handle, and a range dragged down to the 0.05s minimum
-					    can then only be recovered with Reset. */}
-					<div
-						style={{
-							position: "absolute",
-							top: 0,
-							bottom: 0,
-							right: 0,
-							width: `${Math.max(0, ((sourceDurationSec - draftEnd) / sourceDurationSec) * 100)}%`,
-							background: "var(--overlay-dark)",
-							borderRadius: "0 var(--r-sm) var(--r-sm) 0",
-							pointerEvents: "none",
-						}}
-					/>
 				</div>
 			</div>
 
@@ -1148,45 +1138,6 @@ export function EditClipModal({
 							onChange={handleCropRatioChange}
 						/>
 					</div>
-				</div>
-			</div>
-
-			<div
-				style={{
-					display: "flex",
-					justifyContent: "space-between",
-					alignItems: "center",
-					paddingTop: 10,
-					marginTop: 10,
-					flexShrink: 0,
-					borderTop: "1px solid var(--border-soft)",
-				}}
-			>
-				<button
-					type="button"
-					className={`${styles.btn} ${styles.btnSecondary}`}
-					onClick={handleReset}
-					disabled={!hasChanges}
-				>
-					{t("editClipDialog.reset")}
-				</button>
-				<div style={{ display: "flex", gap: 8 }}>
-					<button
-						type="button"
-						className={`${styles.btn} ${styles.btnSecondary}`}
-						onClick={onClose}
-					>
-						{tc("actions.cancel")}
-					</button>
-					<button
-						type="button"
-						className={`${styles.btn} ${styles.btnPrimary}`}
-						onClick={handleApply}
-						disabled={!hasChanges}
-					>
-						<Pencil size={14} />
-						{t("editClipDialog.apply")}
-					</button>
 				</div>
 			</div>
 		</ModalShell>

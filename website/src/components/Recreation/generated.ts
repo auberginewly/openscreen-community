@@ -489,8 +489,15 @@ export const PANELS = {
 		title: "Background",
 		tabs: [
 			"Image",
-			"Color",
 			"Gradient",
+			"Color",
+		],
+		motion: "Animation",
+		motions: [
+			"None",
+			"Drift",
+			"Aurora",
+			"Waves",
 		],
 		uploadCustom: "Upload image",
 		wallpaperCount: 18,
@@ -517,6 +524,8 @@ export const PANELS = {
 	},
 	effects: {
 		title: "Composition",
+		frame: "Frame",
+		motion: "Motion",
 		padding: "Padding",
 		blurBg: "Blur background",
 		motionBlur: "Motion blur",
@@ -526,9 +535,9 @@ export const PANELS = {
 	cursor: {
 		title: "Cursor",
 		show: "Show cursor",
-		theme: "Cursor style",
 		size: "Size",
 		smoothing: "Smoothing",
+		clickBounce: "Click bounce",
 	},
 } as const;
 
@@ -544,6 +553,36 @@ export const EFFECTS = {
 /** Every slider and toggle on those panels, at this document's settings, scaled
  *  and suffixed the way RightPanes.tsx scales and suffixes it. */
 export const CONTROLS = {
+	blurBg: {
+		label: "Blur background",
+		value: 50,
+		min: 0,
+		max: 100,
+		suffix: "%",
+		display: "50%",
+	},
+	shadow: {
+		label: "Shadow",
+		levels: [
+			{
+				value: 0,
+				label: "None",
+			},
+			{
+				value: 0.3,
+				label: "Light",
+			},
+			{
+				value: 0.6,
+				label: "Medium",
+			},
+			{
+				value: 0.9,
+				label: "Strong",
+			},
+		],
+		value: 0.3,
+	},
 	padding: {
 		label: "Padding",
 		value: 55,
@@ -552,10 +591,6 @@ export const CONTROLS = {
 		suffix: "%",
 		display: "55%",
 	},
-	blurBg: {
-		label: "Blur background",
-		on: true,
-	},
 	motionBlur: {
 		label: "Motion blur",
 		value: 30,
@@ -563,14 +598,6 @@ export const CONTROLS = {
 		max: 100,
 		suffix: "%",
 		display: "30%",
-	},
-	shadow: {
-		label: "Shadow",
-		value: 35,
-		min: 0,
-		max: 100,
-		suffix: "%",
-		display: "35%",
 	},
 	roundness: {
 		label: "Roundness",
@@ -584,17 +611,13 @@ export const CONTROLS = {
 		label: "Show cursor",
 		on: true,
 	},
-	cursorTheme: {
-		label: "Cursor style",
-		value: "default",
-	},
 	cursorSize: {
 		label: "Size",
-		value: 45,
-		min: 5,
-		max: 100,
+		value: 4.5,
+		min: 1.5,
+		max: 6,
 		suffix: "",
-		display: "45.0",
+		display: "",
 	},
 	smoothing: {
 		label: "Smoothing",
@@ -604,94 +627,48 @@ export const CONTROLS = {
 		suffix: "%",
 		display: "35%",
 	},
+	clickBounce: {
+		label: "Click bounce",
+		levels: [
+			{
+				value: 0,
+				label: "None",
+			},
+			{
+				value: 1,
+				label: "Light",
+			},
+			{
+				value: 2,
+				label: "Strong",
+			},
+		],
+		value: 1,
+	},
 } as const;
 
-/** The cursor packs the picker shows, each with the application's own hotspot,
- *  normalised to a fraction of the sprite. */
+/** The cursor art the page draws, each sprite with the application's own
+ *  hotspot, normalised to a fraction of the sprite. */
 export const CURSORS = {
-	themeCount: 18,
 	themes: [
 		{
 			id: "default",
 			name: "Default",
-			hotspotX: 0.119,
-			hotspotY: 0.0874,
+			hotspotX: 0.1205,
+			hotspotY: 0.0881,
 			src: "/img/cursors/00-arrow.png",
-		},
-		{
-			id: "pink-glossy-arrow-and-hand-3d",
-			name: "Pink Glossy Arrow & Hand 3D",
-			hotspotX: 0.0469,
-			hotspotY: 0.0469,
-			src: "/img/cursors/01-arrow.png",
-		},
-		{
-			id: "spring-gradient",
-			name: "Spring Gradient",
-			hotspotX: 0.0469,
-			hotspotY: 0.0156,
-			src: "/img/cursors/02-arrow.png",
-		},
-		{
-			id: "black-and-rainbow-stroke-gradient-animated",
-			name: "Black & Rainbow Stroke Gradient Animated",
-			hotspotX: 0.05,
-			hotspotY: 0.03,
-			src: "/img/cursors/03-arrow.png",
-		},
-		{
-			id: "among-us-sus-knife-and-red-animated",
-			name: "Among Us Sus Knife & Red Animated",
-			hotspotX: 0.1531,
-			hotspotY: 0.1016,
-			src: "/img/cursors/04-arrow.png",
-		},
-		{
-			id: "hollow-knight-and-game-arrow",
-			name: "Hollow Knight & Game Arrow",
-			hotspotX: 0.0156,
-			hotspotY: 0.0156,
-			src: "/img/cursors/05-arrow.png",
-		},
-		{
-			id: "mickey-mouse-black-hand-inflated-glove",
-			name: "Mickey Mouse Black Hand Inflated Glove",
-			hotspotX: 0.0781,
-			hotspotY: 0.0156,
-			src: "/img/cursors/06-arrow.png",
-		},
-		{
-			id: "sanrio-kuromi-skull-arrow",
-			name: "Sanrio Kuromi Skull Arrow",
-			hotspotX: 0.0469,
-			hotspotY: 0.0156,
-			src: "/img/cursors/07-arrow.png",
-		},
-		{
-			id: "old-roblox",
-			name: "Old Roblox",
-			hotspotX: 0.0781,
-			hotspotY: 0.0469,
-			src: "/img/cursors/08-arrow.png",
-		},
-		{
-			id: "pokemon-neon-gengar",
-			name: "Pokemon Neon Gengar",
-			hotspotX: 0.0313,
-			hotspotY: 0.0156,
-			src: "/img/cursors/09-arrow.png",
 		},
 	],
 	pointer: {
 		name: "Default",
-		hotspotX: 0.3893,
+		hotspotX: 0.3874,
 		hotspotY: 0.0032,
 		src: "/img/cursors/mac-pointer.png",
 	},
 	text: {
 		name: "Default",
-		hotspotX: 0.4375,
-		hotspotY: 0.5333,
+		hotspotX: 0.4355,
+		hotspotY: 0.5369,
 		src: "/img/cursors/mac-text.png",
 	},
 } as const;
@@ -753,9 +730,9 @@ export const PROVENANCE: ProvenanceEntry[] = [
 	{ shown: "1.80×", source: "computed: effectiveZoomScale(zoomRanges depth 3).toFixed(2) + \"×\" from src/lib/ai-edition/timeline/zoom-scale.ts" },
 	{ shown: "0:02.2", source: "computed: formatSec(2.19 − 0) over trimRange trim_f52989cf-489c-47f5-a6c7-b95a7d71b399" },
 	{ shown: "0:04.9", source: "computed: formatSec(40.033 − 35.12) over trimRange trim_3bad6006-721a-4dd4-a218-091fa734a63e" },
-	{ shown: "Press A to add annotation", source: "timeline.json hints.pressAnnotation — rendered because the document holds no annotation regions" },
-	{ shown: "Press S to add speed", source: "timeline.json hints.pressSpeed — rendered because the document holds no speed regions" },
-	{ shown: "Press C to add a Full Camera segment", source: "timeline.json hints.pressCameraFullscreen — rendered because the document holds no cameraFullscreen regions" },
+	{ shown: "Press A to add annotation", source: "computed: timeline.json hints.pressAnnotation with {{key}} = the default binding (shortcuts.ts DEFAULT_SHORTCUTS, formatBinding) — rendered because the document holds no annotation regions" },
+	{ shown: "Press S to add speed", source: "computed: timeline.json hints.pressSpeed with {{key}} = the default binding (shortcuts.ts DEFAULT_SHORTCUTS, formatBinding) — rendered because the document holds no speed regions" },
+	{ shown: "Press C to add a Full Camera segment", source: "computed: timeline.json hints.pressCameraFullscreen with {{key}} = the default binding (shortcuts.ts DEFAULT_SHORTCUTS, formatBinding) — rendered because the document holds no cameraFullscreen regions" },
 	{ shown: "0:00 0:02 0:04 0:06 0:08 0:10 0:12 0:14 0:16 0:18 0:20 0:22 0:24 0:26 0:28 0:30 0:32 0:34 0:36 0:38 0:40", source: "computed: fmtTick lifted from V4Timeline.tsx over a 2s step, itself derived as the first TICK_STEPS_SEC entry clearing MIN_LABEL_GAP_PX 76 at 47.9604 px/s" },
 	{ shown: "0:40.0", source: "computed: formatSec(assets[0].durationSec = 40.033)" },
 	{ shown: "0:17.5", source: "computed: formatSec(zoomRanges[1].sourceStartSec = 17.5) — where the loop starts" },
@@ -765,8 +742,8 @@ export const PROVENANCE: ProvenanceEntry[] = [
 	{ shown: "Bellrock — docs walkthrough", source: "fixture assets[0].label, as the clip card's own label" },
 	{ shown: "Background", source: "src/i18n/locales/en/settings.json → background.title" },
 	{ shown: "Image", source: "src/i18n/locales/en/settings.json → background.image" },
-	{ shown: "Color", source: "src/i18n/locales/en/settings.json → background.color" },
 	{ shown: "Gradient", source: "src/i18n/locales/en/settings.json → background.gradient" },
+	{ shown: "Color", source: "src/i18n/locales/en/settings.json → background.color" },
 	{ shown: "Upload image", source: "src/i18n/locales/en/settings.json → background.uploadCustom" },
 	{ shown: "Background 1", source: "computed: settings.json background.imageLabel over the 18 wallpapers WALLPAPER_COUNT declares in src/lib/wallpaper.ts" },
 	{ shown: "Composition", source: "src/i18n/locales/en/settings.json → effects.title" },
@@ -777,9 +754,23 @@ export const PROVENANCE: ProvenanceEntry[] = [
 	{ shown: "Roundness", source: "src/i18n/locales/en/settings.json → effects.roundness" },
 	{ shown: "Cursor", source: "src/i18n/locales/en/settings.json → cursor.title" },
 	{ shown: "Show cursor", source: "src/i18n/locales/en/settings.json → cursor.show" },
-	{ shown: "Cursor style", source: "src/i18n/locales/en/settings.json → cursor.theme" },
 	{ shown: "Size", source: "src/i18n/locales/en/settings.json → cursor.size" },
 	{ shown: "Smoothing", source: "src/i18n/locales/en/settings.json → cursor.smoothing" },
+	{ shown: "Click bounce", source: "src/i18n/locales/en/settings.json → cursor.clickBounce" },
+	{ shown: "Animation", source: "src/i18n/locales/en/settings.json → background.motion" },
+	{ shown: "None", source: "src/i18n/locales/en/settings.json → background.motion{None,Drift,Aurora,Waves}" },
+	{ shown: "Drift", source: "src/i18n/locales/en/settings.json → background.motion{None,Drift,Aurora,Waves}" },
+	{ shown: "Aurora", source: "src/i18n/locales/en/settings.json → background.motion{None,Drift,Aurora,Waves}" },
+	{ shown: "Waves", source: "src/i18n/locales/en/settings.json → background.motion{None,Drift,Aurora,Waves}" },
+	{ shown: "Frame", source: "src/i18n/locales/en/settings.json → effects.frame" },
+	{ shown: "Motion", source: "src/i18n/locales/en/settings.json → effects.motion" },
+	{ shown: "None", source: "lifted: SHADOW_LEVELS / CLICK_BOUNCE_LEVELS in RightPanes.tsx, labels from settings.json" },
+	{ shown: "Light", source: "lifted: SHADOW_LEVELS / CLICK_BOUNCE_LEVELS in RightPanes.tsx, labels from settings.json" },
+	{ shown: "Medium", source: "lifted: SHADOW_LEVELS / CLICK_BOUNCE_LEVELS in RightPanes.tsx, labels from settings.json" },
+	{ shown: "Strong", source: "lifted: SHADOW_LEVELS / CLICK_BOUNCE_LEVELS in RightPanes.tsx, labels from settings.json" },
+	{ shown: "None", source: "lifted: SHADOW_LEVELS / CLICK_BOUNCE_LEVELS in RightPanes.tsx, labels from settings.json" },
+	{ shown: "Light", source: "lifted: SHADOW_LEVELS / CLICK_BOUNCE_LEVELS in RightPanes.tsx, labels from settings.json" },
+	{ shown: "Strong", source: "lifted: SHADOW_LEVELS / CLICK_BOUNCE_LEVELS in RightPanes.tsx, labels from settings.json" },
 ];
 
 /** What check-recreation.mjs asserts against. */

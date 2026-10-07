@@ -3,9 +3,13 @@
 // catalog: the bridge, the settings hook, the platform and the toaster are the only fakes.
 
 import "@testing-library/jest-dom";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { I18nProvider } from "@/contexts/I18nContext";
+import { ShortcutsProvider } from "@/contexts/ShortcutsContext";
 import { LOCALE_STORAGE_KEY } from "@/i18n/config";
 import {
 	DEFAULT_EDITOR_SETTINGS,
@@ -92,30 +96,34 @@ function renderPane() {
 	localStorage.setItem(LOCALE_STORAGE_KEY, "en");
 	return render(
 		<I18nProvider>
-			<EditorTopBar
-				mode="edit"
-				onModeChange={noop}
-				projectTitle="Project"
-				dirty={false}
-				canExport={false}
-				canUndo={false}
-				canRedo={false}
-				chatOpen={false}
-				actions={{
-					openProject: noop,
-					newProject: noop,
-					save: noop,
-					export: noop,
-					openSettings: noop,
-					renameProject: noop,
-					toggleChat: noop,
-					openProviderSettings: noop,
-					showAbout: noop,
-					checkForUpdates: noop,
-					undo: noop,
-					redo: noop,
-				}}
-			/>
+			<ShortcutsProvider>
+				<TooltipProvider>
+					<EditorTopBar
+						mode="edit"
+						onModeChange={noop}
+						projectTitle="Project"
+						dirty={false}
+						canExport={false}
+						canUndo={false}
+						canRedo={false}
+						chatOpen={false}
+						actions={{
+							openProject: noop,
+							newProject: noop,
+							save: noop,
+							export: noop,
+							openSettings: noop,
+							renameProject: noop,
+							toggleChat: noop,
+							openProviderSettings: noop,
+							showAbout: noop,
+							checkForUpdates: noop,
+							undo: noop,
+							redo: noop,
+						}}
+					/>
+				</TooltipProvider>
+			</ShortcutsProvider>
 		</I18nProvider>,
 	);
 }
@@ -231,6 +239,31 @@ describe("Presets menu in the editor top bar", () => {
 			"aria-checked",
 			"false",
 		);
+	});
+
+	it("checks exactly one row when two saved presets share a look", async () => {
+		state.presets.list = vi.fn<Fn>(async () => [WARM, { ...WARM, id: "Twin", name: "Twin" }]);
+		state.settings = { ...DEFAULT_EDITOR_SETTINGS, padding: 42, wallpaper: "#aa5500" };
+		renderPane();
+		const menu = await openMenu();
+		const checked = within(menu)
+			.getAllByRole("menuitemradio")
+			.filter((row) => row.getAttribute("aria-checked") === "true");
+		expect(checked.map((row) => row.textContent)).toEqual(["Warm"]);
+	});
+
+	it("keeps a twin checked while the matching row is being renamed", async () => {
+		state.presets.list = vi.fn<Fn>(async () => [WARM, { ...WARM, id: "Twin", name: "Twin" }]);
+		state.settings = { ...DEFAULT_EDITOR_SETTINGS, padding: 42, wallpaper: "#aa5500" };
+		renderPane();
+		await openMenu();
+		openRowActions("Warm");
+		fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
+		// Warm's row is a name form now, so the mark sits on the twin that still matches.
+		const checked = within(screen.getByRole("menu", { name: "Style presets" }))
+			.getAllByRole("menuitemradio")
+			.filter((row) => row.getAttribute("aria-checked") === "true");
+		expect(checked.map((row) => row.textContent)).toEqual(["Twin"]);
 	});
 
 	it("opens a row's actions from “⋯” without applying the preset", async () => {
@@ -436,5 +469,20 @@ describe("Presets menu in the editor top bar", () => {
 		fireEvent.click(screen.getByRole("menuitem", { name: label }));
 		await waitFor(() => expect(state.presets.reveal).toHaveBeenCalledWith("Warm"));
 		expect(state.set).not.toHaveBeenCalled();
+	});
+});
+
+// The other menu hanging off the bar: while it is open the bar stops being a window-drag region
+// too, or a click on the empty bar never reaches the page to close it (#1009).
+describe("Presets menu and the bar's drag region", () => {
+	const css = readFileSync(path.join(__dirname, "EditorShellV4.module.css"), "utf8");
+	const [, condition = ""] = css.match(/\n\.topbar(:has\([^{]*\))\s*\{/) ?? [];
+
+	it("puts the bar under the no-drag rule while it is open", async () => {
+		renderPane();
+		const bar = screen.getByRole("button", { name: "Presets" }).closest("header") as HTMLElement;
+		expect(bar.matches(condition)).toBe(false);
+		await openMenu();
+		expect(bar.matches(condition)).toBe(true);
 	});
 });

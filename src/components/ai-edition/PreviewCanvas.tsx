@@ -9,19 +9,21 @@
 // the actual pixels come from the native canvas, not from this layout):
 //   .previewFrame           → canvas (wallpaper bg; never receives padding
 //                             from the slider directly).
-//   .screenStage            → sizes/positions the zoom/annotation overlays by
-//                             the composite-layout math (PiP/dual/stack/no-cam);
+//   .screenStage            → sizes/positions the zoom overlay by the
+//                             composite-layout math (PiP/dual/stack/no-cam);
 //                             its own <video> is CSS-hidden (decode/clock only).
 //   .webcamSlot             → drag-to-reposition hitbox for the webcam PiP,
 //                             positioned by the same math; its <video> is
 //                             CSS-hidden too.
+//   AnnotationLayer         → the whole frame: annotations are placed on it,
+//                             a blur on the footage rect inside it.
 //
 // The composite layout is computed from `.previewFrame`'s actual rendered
 // size (via ResizeObserver), so the camera + screen both resize correctly
 // as the user resizes the workbench.
 
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
 	type CameraFullscreenRegion,
 	type CropRegion,
@@ -31,7 +33,10 @@ import {
 	type ZoomFocus,
 } from "@/components/video-editor/types";
 import { useScopedT } from "@/contexts/I18nContext";
-import { resolveAspectRatioValue } from "@/lib/ai-edition/document/outputFormat";
+import {
+	isFormatFillActive,
+	resolveAspectRatioValue,
+} from "@/lib/ai-edition/document/outputFormat";
 import type {
 	AxcutAnnotationRegion,
 	AxcutAudioTrack,
@@ -43,7 +48,6 @@ import type {
 import { useProjectStore } from "@/lib/ai-edition/store/projectStore";
 import { useEditorSettings } from "@/lib/ai-edition/store/useEditorSettings";
 import { resolveActiveCameraTrack } from "@/lib/ai-edition/timeline/camera";
-import { createPlaybackClockRef } from "@/lib/ai-edition/timeline/playback-clock";
 import type { SpeedRegion } from "@/lib/ai-edition/timeline/speed";
 import { locateVirtualPosition } from "@/lib/ai-edition/timeline/virtual-preview";
 import {
@@ -54,9 +58,15 @@ import {
 	type WebcamCompositeLayout,
 } from "@/lib/compositeLayout";
 import { webcamAnchorAt } from "@/lib/projectDefaults";
-import { classifyWallpaper, resolveImageWallpaperUrl } from "@/lib/wallpaper";
+import { wallpaperStyle } from "@/lib/wallpaper";
 import { getCssClipPath } from "@/lib/webcamMaskShapes";
 import { computeCameraFullscreenProgress } from "@/lib/zoomMath/cameraFullscreenUtils";
+import { webcamBoxSourceSize } from "@/native/sceneDescription";
+import {
+	getWebcamNativeSize,
+	getWebcamNativeSizeRevision,
+	subscribeWebcamNativeSize,
+} from "@/native/webcamSizeCache";
 import { AnnotationLayer } from "./AnnotationLayer";
 import { NativeCompositorOverlay } from "./NativeCompositorOverlay";
 import styles from "./NewEditorShell.module.css";
@@ -85,8 +95,8 @@ interface PreviewCanvasProps {
 	annotationRegions?: AxcutAnnotationRegion[];
 	selectedAnnotationId?: string | null;
 	onSelectAnnotation?: (id: string) => void;
-	onAnnotationPositionChange?: (id: string, position: { x: number; y: number }) => void;
-	onAnnotationSizeChange?: (id: string, size: { width: number; height: number }) => void;
+	/** Live edit of an annotation's geometry (and, for a text, its size) during a gesture. */
+	onAnnotationChange?: (id: string, patch: Partial<AxcutAnnotationRegion>) => void;
 	onAnnotationBlurDataChange?: (id: string, blurData: BlurData) => void;
 	onAnnotationCommit?: () => void;
 	seekTarget: { timeSec: number; requestId: number } | null;
@@ -114,11 +124,6 @@ interface PreviewCanvasProps {
 // (the <video> contain-fits its true ratio within a box sized for the wrong
 // one), on top of the intentional `settings.padding` margin.
 const SCREEN_SOURCE_SIZE = { width: 1920, height: 1080 };
-// ponytail: live preview defaults until the camera <video> reports its real
-// dimensions via loadedmetadata. 4:3 is the legacy default — typical webcams
-// capture at 1.33, and using a 16:9 default collapses vertical-stack to a
-// degenerate full-bleed camera with 0px screen height.
-const WEBCAM_SOURCE_SIZE = { width: 960, height: 720 };
 
 export function PreviewCanvas(props: PreviewCanvasProps) {
 	const te = useScopedT("editor");
@@ -129,11 +134,6 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 	const assets = document?.assets ?? [];
 	const frameRef = useRef<HTMLDivElement | null>(null);
 	const webcamSlotRef = useRef<HTMLDivElement | null>(null);
-	// One clock per mounted canvas, shared between the screen preview (writer)
-	// and the webcam overlay (reader) — see playback-clock.ts.
-	const clockRefHolder = useRef<ReturnType<typeof createPlaybackClockRef>>();
-	if (!clockRefHolder.current) clockRefHolder.current = createPlaybackClockRef();
-	const clockRef = clockRefHolder.current;
 	// Real dimensions of the active source, from the <video>'s own
 	// onLoadedMetadata (videoWidth/videoHeight) — null until the first source
 	// loads, then falls back to SCREEN_SOURCE_SIZE.
@@ -236,7 +236,25 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 		[assets, props.clips, props.currentTimeSec],
 	);
 	const activeClipHasCamera = Boolean(activeCameraTrack?.visible && activeCameraTrack.sourcePath);
+	// The drag box takes the camera's real proportions, the ones the native canvas draws
+	// (a portrait camera in "Original" is a portrait box), not a fixed 4:3.
+	const webcamSizeRevision = useSyncExternalStore(
+		subscribeWebcamNativeSize,
+		getWebcamNativeSizeRevision,
+		() => 0,
+	);
+	// biome-ignore lint/correctness/useExhaustiveDependencies: the revision re-reads the probed-size cache
+	const webcamSourceSize = useMemo(
+		() =>
+			webcamBoxSourceSize(
+				activeCameraTrack,
+				activeCameraTrack?.sourcePath ? getWebcamNativeSize(activeCameraTrack.sourcePath) : null,
+				settings.webcamCropRegion,
+			),
+		[activeCameraTrack, settings.webcamCropRegion, webcamSizeRevision],
+	);
 
+	const formatFill = useMemo(() => (document ? isFormatFillActive(document) : false), [document]);
 	const layout = useMemo(() => {
 		// A clip with no camera lays out as "no-webcam", whatever the panel says. Hiding
 		// only the webcam slot is not enough: the block presets size the SCREEN off the
@@ -265,20 +283,23 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 		return computeCompositeLayout({
 			canvasSize: frameSize,
 			maxContentSize,
-			screenSize: croppedScreenSize,
-			webcamSize: preset === "no-webcam" ? null : WEBCAM_SOURCE_SIZE,
+			// Same box as the scene: a filled format gives the screen the whole padded area.
+			screenSize: formatFill ? maxContentSize : croppedScreenSize,
+			webcamSize: preset === "no-webcam" ? null : webcamSourceSize,
 			layoutPreset: preset,
 			webcamSizePreset: settings.webcamSizePreset,
 			// Picture-in-picture only: the block layouts place and round their own camera.
 			webcamAnchor: settings.webcamAnchor,
 			webcamMaskShape: mask,
 			webcamRoundness: settings.webcamRoundness,
+			frame: settings.frame,
 		});
 	}, [
 		frameSize,
 		screenNativeSize,
 		cropRegion,
 		activeClipHasCamera,
+		webcamSourceSize,
 		settings.webcamLayoutPreset,
 		settings.webcamMaskShape,
 		settings.webcamSizePreset,
@@ -286,6 +307,8 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 		settings.webcamRoundness,
 		settings.padding,
 		settings.aspectRatio,
+		formatFill,
+		settings.frame,
 	]);
 
 	// Full Camera: during a cameraFullscreen region the webcam takes the whole
@@ -312,10 +335,10 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 		};
 	}, [layout, cameraFullscreenProgress, frameSize]);
 
-	// The stage hosting the interactive overlays is the CONTENT rect, and a frame never changes
-	// it: the compositor keeps the footage the same size with or without a frame and grows the
-	// frame outward, so every handle (annotations, privacy blur, zoom focus) sits on `layout`.
-	const frameStyle = useMemo(() => buildFrameStyle(settings), [settings]);
+	// The stage hosting the interactive overlays is the CONTENT rect: the compositor draws the
+	// frame around it (grown outward, or laid out beside the camera in a block layout), so every
+	// handle (annotations, privacy blur, zoom focus) sits on `layout`.
+	const frameStyle = useMemo(() => wallpaperStyle(settings.wallpaper), [settings.wallpaper]);
 	const screenStyle = useMemo(
 		() => buildScreenStyle(layout, settings, frameSize),
 		[layout, settings, frameSize],
@@ -355,7 +378,6 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 		onVideoElement: relayIsPlaying,
 		onLoadedMetadata: relayLoadedMetadata,
 		cropRegion,
-		clockRef,
 	};
 
 	const handleWebcamPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -416,8 +438,8 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 		>
 			{/* Sole pixel source: the D3D-composited frame (wallpaper + screen + webcam +
 			    cursor), streamed into a canvas. The <video> elements below are CSS-hidden
-			    (visibility only — they stay mounted for decode/playback-clock/metadata
-			    duties, since the native compositor doesn't drive playback itself), and the
+			    (visibility only — they stay mounted as the playback clock and for metadata,
+			    since the native compositor doesn't drive playback itself), and the
 			    interactive-only layers (ZoomFocusOverlay, AnnotationLayer, webcam drag
 			    hitbox) still render on top as normal DOM so they stay clickable. No more
 			    dual preview path. */}
@@ -438,7 +460,6 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 						// behind a flag with its own tests.
 						// See technical-documentation/architecture/preview.md
 						// (todo) for the failure write-up.
-						void relayProps.clockRef;
 						return (
 							<VirtualPreview
 								{...relayProps}
@@ -452,23 +473,6 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 							isPlaying={isPlaying}
 							onFocusChange={props.onZoomFocusChange}
 							onFocusCommit={props.onZoomFocusCommit}
-						/>
-					) : null}
-					{props.annotationRegions &&
-					props.onSelectAnnotation &&
-					props.onAnnotationPositionChange &&
-					props.onAnnotationSizeChange &&
-					props.onAnnotationCommit ? (
-						<AnnotationLayer
-							annotations={props.annotationRegions}
-							selectedAnnotationId={props.selectedAnnotationId ?? null}
-							currentTimeSec={props.currentTimeSec}
-							containerWidth={layout.screenRect.width}
-							containerHeight={layout.screenRect.height}
-							onSelectAnnotation={props.onSelectAnnotation}
-							onPositionChange={props.onAnnotationPositionChange}
-							onSizeChange={props.onAnnotationSizeChange}
-							onCommit={props.onAnnotationCommit}
 						/>
 					) : null}
 				</div>
@@ -485,60 +489,36 @@ export function PreviewCanvas(props: PreviewCanvasProps) {
 					onPointerDown={isPipGrab ? handleWebcamPointerDown : undefined}
 					aria-label={te("preview.webcamPreview")}
 				>
-					<WebcamOverlay
-						clips={props.clips}
-						currentTimeSec={props.currentTimeSec}
-						onTimeChange={props.onTimeChange}
-						isPlaying={isPlaying}
-						clockRef={clockRef}
-						borderRadius={
-							effectiveLayout?.webcamRect?.borderRadius ?? layout.webcamRect.borderRadius
-						}
-						webcamMaskShape={effectiveLayout?.webcamRect?.maskShape ?? settings.webcamMaskShape}
-						layoutPreset={settings.webcamLayoutPreset}
-					/>
+					<WebcamOverlay clips={props.clips} currentTimeSec={props.currentTimeSec} />
 				</div>
+			) : null}
+			{/* Last, so a selected annotation over the camera takes the pointer before the
+			    camera's drag hitbox does. It spans the frame: text, images and arrows move
+			    anywhere in it, over the padding too. */}
+			{layout?.screenRect &&
+			props.annotationRegions &&
+			props.onSelectAnnotation &&
+			props.onAnnotationChange &&
+			props.onAnnotationCommit ? (
+				<AnnotationLayer
+					annotations={props.annotationRegions}
+					selectedAnnotationId={props.selectedAnnotationId ?? null}
+					currentTimeSec={props.currentTimeSec}
+					frameWidth={frameSize.width}
+					frameHeight={frameSize.height}
+					footage={layout.screenRect}
+					onSelectAnnotation={props.onSelectAnnotation}
+					onChange={props.onAnnotationChange}
+					onCommit={props.onAnnotationCommit}
+				/>
 			) : null}
 		</div>
 	);
 }
 
-// ponytail: resolve `settings.wallpaper` to an actual CSS background. Image
-// wallpapers must go through resolveImageWallpaperUrl (→ getAssetPath): in the
-// packaged Electron app the renderer loads over file://, where a bare
-// `/wallpapers/foo.jpg` points at the filesystem root and 404s, so the custom
-// background silently failed to paint (worked in the http dev server only).
-// classifyWallpaper also handles color-function (rgb/hsl/…) and every gradient
-// variant, which the old ad-hoc startsWith checks missed.
-function resolveWallpaperImageUrl(imagePath: string): string | null {
-	try {
-		return resolveImageWallpaperUrl(imagePath);
-	} catch {
-		return null;
-	}
-}
-
-// Canvas: wallpaper only — no padding, no shadow.
-function buildFrameStyle(
-	settings: ReturnType<typeof useEditorSettings>["settings"],
-): React.CSSProperties {
-	const w = classifyWallpaper(settings.wallpaper);
-	if (w.kind === "color") return { backgroundColor: w.value };
-	if (w.kind === "gradient") return { backgroundImage: w.value, backgroundSize: "cover" };
-	const url = resolveWallpaperImageUrl(w.path);
-	if (!url) return {};
-	return {
-		backgroundImage: `url(${url})`,
-		backgroundSize: "cover",
-		backgroundPosition: "center",
-		backgroundRepeat: "no-repeat",
-	};
-}
-
 // Screen stage: rectangle from the composite layout, converted to percentages
-// of the canvas. Positions/sizes the interactive overlays (ZoomFocusOverlay,
-// AnnotationLayer) hosted inside it and the CSS-hidden <video> (decode/clock
-// only) — no borderRadius/boxShadow here: the native canvas already draws its
+// of the canvas. Positions/sizes the zoom overlay hosted inside it and the
+// CSS-hidden <video> (decode/clock only) — no borderRadius/boxShadow here: the native canvas already draws its
 // own rounded corners + shadow for this exact rect, and this container sits
 // on TOP of it (z-index for the interactive layers). Duplicating the same
 // decoration in CSS produced a visible "double rounded corner" — two

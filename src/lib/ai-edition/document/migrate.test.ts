@@ -16,7 +16,7 @@ function makeV2Project(overrides: Partial<EditorProjectData> = {}): EditorProjec
 			wallpaper: "/wallpapers/wallpaper1.jpg",
 			wallpaperMotion: "none",
 			shadowIntensity: 0,
-			showBlur: false,
+			backgroundBlur: 0,
 			motionBlurAmount: 0,
 			depthOfField: true,
 			borderRadius: 0,
@@ -110,11 +110,10 @@ describe("migrateProjectDataToAxcutDocument", () => {
 							depth: 4,
 							focus: { cx: 1.5, cy: -0.5 },
 							focusMode: "manual",
-							rotationPreset: "iso",
+							rotationPreset: "iso" as never,
 							customScale: 2.5,
 							source: "manual",
 							hideCursor: true,
-							clickImpact: true,
 						},
 					],
 				},
@@ -128,9 +127,30 @@ describe("migrateProjectDataToAxcutDocument", () => {
 		expect(z.startMs).toBe(0);
 		expect(z.endMs).toBe(2000);
 		expect(z.customScale).toBe(2.5);
-		expect(z.rotationPreset).toBe("iso");
+		// `iso`, retired, reads as Left: the angle that kept its look.
+		expect(z.rotationPreset).toBe("left");
 		expect(z.hideCursor).toBe(true);
-		expect(z.clickImpact).toBe(true);
+	});
+
+	// Up to v1.13.0 the click impact was a zoom option; it is the cursor setting now.
+	it("turns a zoom's click impact into the cursor setting", () => {
+		const zoom = {
+			id: "z_1",
+			startMs: 0,
+			endMs: 2000,
+			depth: 3 as const,
+			focus: { cx: 0.5, cy: 0.5 },
+		};
+		const doc = migrateProjectDataToAxcutDocument(
+			makeV2Project({
+				editor: {
+					...makeV2Project().editor,
+					zoomRegions: [{ ...zoom, clickImpact: true } as never],
+				},
+			}),
+		);
+		expect(getEditorSettings(doc).cursor.clickImpact).toBe(true);
+		expect("clickImpact" in doc.zoomRanges[0]).toBe(false);
 	});
 
 	it("converts annotationRegions to seconds with type and content preserved", () => {
@@ -235,10 +255,10 @@ describe("migrateProjectDataToAxcutDocument", () => {
 
 	it("carries cursor tuning keys from a v2 editor into getEditorSettings", () => {
 		const v2 = makeV2Project();
-		v2.editor.cursorSize = 0.3;
+		v2.editor.cursorSize = 2.5;
 		v2.editor.cursorClickBounce = 0;
 		const settings = getEditorSettings(migrateProjectDataToAxcutDocument(v2));
-		expect(settings.cursor.size).toBe(0.3);
+		expect(settings.cursor.size).toBe(2.5);
 		expect(settings.cursor.clickBounce).toBe(0);
 	});
 
@@ -334,6 +354,16 @@ describe("migrateAxcutDocumentToProjectData", () => {
 		expect(back.editor.webcamMaskShape).toBe("circle");
 	});
 
+	it("reads a legacyEditor blur switch as the amount it drew", () => {
+		const doc = migrateProjectDataToAxcutDocument(makeV2Project());
+		const { backgroundBlur: _amount, ...legacy } = doc.legacyEditor as Record<string, unknown>;
+		const back = migrateAxcutDocumentToProjectData({
+			...doc,
+			legacyEditor: { ...legacy, showBlur: true },
+		});
+		expect(back.editor.backgroundBlur).toBe(0.5);
+	});
+
 	it("defaults wallpaperMotion to none when legacyEditor lacks it", () => {
 		const doc = migrateProjectDataToAxcutDocument(makeV2Project());
 		const { wallpaperMotion: _omitted, ...legacy } = doc.legacyEditor as Record<string, unknown>;
@@ -372,7 +402,6 @@ describe("migrateAxcutDocumentToProjectData", () => {
 						depth: 4,
 						focus: { cx: 0.5, cy: 0.5 },
 						hideCursor: true,
-						clickImpact: true,
 					},
 					{ id: "z_2", startMs: 3000, endMs: 4000, depth: 2, focus: { cx: 0.5, cy: 0.5 } },
 				],
@@ -405,9 +434,6 @@ describe("migrateAxcutDocumentToProjectData", () => {
 		expect(back.editor.zoomRegions[0].startMs).toBe(0);
 		expect(back.editor.zoomRegions[0].endMs).toBe(2000);
 		expect(back.editor.zoomRegions[0].hideCursor).toBe(true);
-		expect(back.editor.zoomRegions[0].clickImpact).toBe(true);
-		expect("clickImpact" in back.editor.zoomRegions[1]).toBe(false);
-		expect("clickImpact" in doc.zoomRanges[1]).toBe(false);
 		expect(back.editor.annotationRegions[0].startMs).toBe(1000);
 		expect(back.editor.annotationRegions[0].endMs).toBe(3000);
 	});

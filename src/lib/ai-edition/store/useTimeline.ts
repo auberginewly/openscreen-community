@@ -12,6 +12,8 @@ import type {
 	Rotation3DPreset,
 } from "@/components/video-editor/types";
 import { useScopedT } from "@/contexts/I18nContext";
+import { DEFAULT_TEXT_PLATE } from "../annotations/background";
+import { fitTextBox } from "../annotations/placement";
 import {
 	collapseTracksToPills,
 	patchAudioTrack,
@@ -20,11 +22,15 @@ import {
 	trackGroupId,
 } from "../document/audioTracks";
 import { createId } from "../document/ids";
+import { resolveAspectRatioValue } from "../document/outputFormat";
 import {
+	clearEditRegions,
+	countEditRegions,
 	duplicateClip as duplicateClipInDocument,
 	moveClip as moveClipInDocument,
 	PLACEHOLDER_DURATION_SEC,
 	type RegionKind,
+	readSpeedRegions,
 	removeClip as removeClipInDocument,
 	removeRegion as removeRegionInDocument,
 	resequenceClips,
@@ -39,11 +45,12 @@ import {
 	anchorRegionsWithDerivedMs,
 	dropPillsByIds,
 	replacePillSpan,
-	resolvePillIds,
+	resolveRegionIds,
 } from "../timeline/timelineMap";
 import { dropTrimPillsByIds, resolveTimelineSpanToTrim } from "../timeline/trim-mapping";
 import { MAX_ZOOM_SCALE, MIN_ZOOM_SCALE } from "../timeline/zoom-scale";
 import type { AutoZoomSuggestion } from "../timeline/zoom-suggestions";
+import { getEditorSettings } from "./editorSettings";
 import { saveWithDeadline, useProjectStore, waitForDocumentSaves } from "./projectStore";
 import { currentWriteEpoch } from "./undoStack";
 import { useSequentialTimelineOps } from "./useSequentialTimelineOps";
@@ -77,15 +84,17 @@ interface RegionHandle {
 type Clip = AxcutDocument["timeline"]["clips"][number];
 
 /**
- * Patch every region under the pill `id` belongs to. A payload edit must hit them all,
- * or the pieces of one pill would disagree — and then, by the merge rule, visibly split.
+ * Patch the region `id` belongs to: every fragment of it across clip junctions, or the
+ * pieces of one region would disagree and, by the merge rule, visibly split. Not the whole
+ * pill: a region that merely matches and touches it is another region, left alone so the
+ * pill separates (#1017, see `resolveRegionIds`).
  */
-function patchPillById<T extends { id: string; startMs: number; endMs: number }>(
+function patchRegionById<T extends { id: string; startMs: number; endMs: number; clipId?: string }>(
 	regions: T[],
 	id: string,
 	patch: Partial<T>,
 ): T[] {
-	const under = new Set(resolvePillIds(regions, id));
+	const under = new Set(resolveRegionIds(regions, id));
 	return regions.map((r) => (under.has(r.id) ? { ...r, ...patch } : r));
 }
 
@@ -339,8 +348,10 @@ export function useTimeline() {
 						startMs: timeMs,
 						endMs,
 						depth: 3,
+						// Auto: a zoom added with Z frames what the pointer is doing, like the ones
+						// placed at import. The centre is its fallback where no pointer was recorded.
 						focus: { cx: 0.5, cy: 0.5 },
-						focusMode: "manual" as const,
+						focusMode: "auto" as const,
 					},
 				],
 				document.timeline.clips,
@@ -432,7 +443,7 @@ export function useTimeline() {
 		async (durationSec = DEFAULT_NEW_REGION_SEC) => {
 			if (!document) return;
 			const timeMs = Math.round(playheadSec() * 1000);
-			const ann: AnnotationRegion = {
+			const draft: AnnotationRegion = {
 				id: createId("ann"),
 				startMs: timeMs,
 				endMs: timeMs + Math.round(durationSec * 1000),
@@ -445,11 +456,14 @@ export function useTimeline() {
 				// `content || textContent` and seeding both would just duplicate it.
 				content: ts("annotation.defaultText"),
 				textContent: "",
+				// On the frame, free of the footage: padding never moves it.
+				space: "frame",
+				// A point at the centre of the frame; `fitTextBox` below grows the box around it.
 				position: { x: 50, y: 50 },
-				size: { width: 30, height: 20 },
+				size: { width: 0, height: 0 },
 				style: {
 					color: "#ffffff",
-					backgroundColor: "transparent",
+					backgroundColor: DEFAULT_TEXT_PLATE,
 					fontSize: 32,
 					fontFamily: "Inter",
 					fontWeight: "bold",
@@ -460,6 +474,11 @@ export function useTimeline() {
 				},
 				zIndex: document.annotations.length + 1,
 			};
+			const frameAspect = resolveAspectRatioValue(
+				document,
+				getEditorSettings(document).aspectRatio,
+			);
+			const ann: AnnotationRegion = { ...draft, ...fitTextBox(draft, frameAspect) };
 			const created = anchorRegionsWithDerivedMs([ann], document.timeline.clips, () =>
 				createId("ann"),
 			);
@@ -640,7 +659,7 @@ export function useTimeline() {
 	});
 
 	// Every whole-document write to one zoom goes through this chain: the pane's one-field
-	// writes (level, 3D tilt, focus mode, cursor, click impact), a pill's span, and the focus
+	// writes (level, 3D tilt, focus mode, cursor), a pill's span, and the focus
 	// commit. `write` runs INSIDE the chain, on the document the previous zoom write left, and
 	// returns its `saveDocument`. The level buttons step while the previous save is still out,
 	// and 3 -> 4 -> 5 built both saves from the render's depth-3 document: the main process does
@@ -711,7 +730,7 @@ export function useTimeline() {
 				saveDocument(
 					{
 						...doc,
-						zoomRanges: patchPillById(doc.zoomRanges, id, patch) as AxcutDocument["zoomRanges"],
+						zoomRanges: patchRegionById(doc.zoomRanges, id, patch) as AxcutDocument["zoomRanges"],
 					},
 					{ history: true, historyBase },
 				),
@@ -771,7 +790,7 @@ export function useTimeline() {
 			};
 			const next: AxcutDocument = {
 				...doc,
-				zoomRanges: patchPillById(doc.zoomRanges, id, {
+				zoomRanges: patchRegionById(doc.zoomRanges, id, {
 					focus: edit.focus,
 				}) as AxcutDocument["zoomRanges"],
 			};
@@ -827,7 +846,7 @@ export function useTimeline() {
 				// again. When the writes since carried the focus along, there is nothing to add.
 				next = {
 					...doc,
-					zoomRanges: patchPillById(doc.zoomRanges, edit.id, {
+					zoomRanges: patchRegionById(doc.zoomRanges, edit.id, {
 						focus: edit.focus,
 					}) as AxcutDocument["zoomRanges"],
 				};
@@ -901,16 +920,6 @@ export function useTimeline() {
 		[saveZoomPatch],
 	);
 
-	// Per-region, like the preset it animates. `undefined` rather than `false` so the document
-	// keeps omitting the key when the option is off. Shares `saveZoomPatch` with the pane's
-	// other one-field writes: a toggle arriving while a level write is still pending must not
-	// rebuild the pill from the stale pre-level document and drop the level on the floor.
-	const updateZoomClickImpact = useCallback(
-		(id: string, clickImpact: boolean) =>
-			saveZoomPatch(id, { clickImpact: clickImpact ? true : undefined }),
-		[saveZoomPatch],
-	);
-
 	const updateAnnotationSpan = useCallback(
 		async (id: string, startMs: number, endMs: number) => {
 			if (!document) return;
@@ -944,7 +953,7 @@ export function useTimeline() {
 			if (annotationLiveRef.current !== doc) annotationRollbackRef.current = doc;
 			const next: AxcutDocument = {
 				...doc,
-				annotations: patchPillById(doc.annotations, id, patch),
+				annotations: patchRegionById(doc.annotations, id, patch),
 			};
 			setDocument(next, { history: false });
 			annotationLiveRef.current = next;
@@ -1059,7 +1068,7 @@ export function useTimeline() {
 				...document,
 				legacyEditor: {
 					...legacy,
-					speedRegions: patchPillById(prev, id, { speed }),
+					speedRegions: patchRegionById(prev, id, { speed }),
 				},
 			};
 			await saveDocument(next, { history: true });
@@ -1129,6 +1138,22 @@ export function useTimeline() {
 		},
 		[document, saveDocument],
 	);
+
+	// Every edit region (zoom, speed, trim, annotation, Full Camera), on every clip, in one
+	// write: one undo step brings them all back. Clips, media, audio tracks, captions and the
+	// transcript are content, not edits, and stay (see `clearEditRegions`).
+	//
+	// `hasEditRegions` counts the STORED regions, not the pills the lanes draw: a trim whose
+	// clip is gone is stored and cleared but has no pill. The toolbar button reads it too, so
+	// what shows the button and what the action clears are one count.
+	const hasEditRegions = document !== null && countEditRegions(document) > 0;
+	const clearTimeline = useCallback(async () => {
+		if (!document || !hasEditRegions) return;
+		if (!(await saveDocument(clearEditRegions(document), { history: true }))) return;
+		// Every region a selection can point at is gone. An audio track is not one of them.
+		if (selection && selection.kind !== "audio") setSelection(null);
+		setMultiSelection((prev) => prev.filter((h) => h.kind === "audio"));
+	}, [document, hasEditRegions, selection, saveDocument]);
 
 	// Selecting a pill and selecting a clip are the SAME act — "this is the thing
 	// I mean" — so they cancel each other. They used to be two states that could
@@ -1414,12 +1439,7 @@ export function useTimeline() {
 	);
 
 	const speedRegions = hasDoc
-		? (((document.legacyEditor as Record<string, unknown> | null)?.speedRegions as Array<{
-				id: string;
-				startMs: number;
-				endMs: number;
-				speed: number;
-			}>) ?? [])
+		? readSpeedRegions<{ id: string; startMs: number; endMs: number; speed: number }>(document)
 		: [];
 
 	const cameraFullscreenRegions = hasDoc
@@ -1634,6 +1654,8 @@ export function useTimeline() {
 		addCameraFullscreen,
 		removeRegion,
 		removeRegions,
+		hasEditRegions,
+		clearTimeline,
 		addAudioTrack,
 		addAudio,
 		removeAudioTrack,
@@ -1661,7 +1683,6 @@ export function useTimeline() {
 		updateZoomRotation,
 		updateZoomFocusMode,
 		updateZoomHideCursor,
-		updateZoomClickImpact,
 		updateAnnotationSpan,
 		updateAnnotationLive,
 		commitAnnotationChange,

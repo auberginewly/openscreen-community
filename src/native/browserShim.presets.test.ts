@@ -16,7 +16,7 @@ const APPEARANCE: StylePresetAppearance = {
 	frameTheme: "light",
 	aspectRatio: "16:9",
 	shadowIntensity: 0.2,
-	showBlur: false,
+	backgroundBlur: 0,
 	motionBlurAmount: 0.2,
 	depthOfField: true,
 	borderRadius: 40,
@@ -34,9 +34,10 @@ const APPEARANCE: StylePresetAppearance = {
 		size: 3,
 		smoothing: 0.67,
 		motionBlur: 0.35,
-		clickBounce: 2.5,
+		clickBounce: 1,
 		model3d: false,
-		alwaysArrow: false,
+		asArrow: [],
+		clickImpact: false,
 	},
 	cursorShow: true,
 	cursorAutoHide: false,
@@ -73,6 +74,17 @@ describe("browserShim presets", () => {
 		expect(await presets.delete(b.id)).toEqual({ success: true });
 		expect((await presets.list()).map((p) => p.id)).toEqual(["Alpha"]);
 		expect(await presets.reveal(a.id)).toEqual({ success: true });
+	});
+
+	it("marks the preset for new projects, follows a rename and clears on delete", async () => {
+		const a = await presets.create("Alpha", APPEARANCE);
+		await presets.setForNewProjects(a.id);
+		expect((await presets.list())[0]?.forNewProjects).toBe(true);
+		const renamed = await presets.rename(a.id, "Brand");
+		expect((await presets.list()).find((p) => p.forNewProjects)?.id).toBe(renamed.id);
+		await presets.delete(renamed.id);
+		await presets.create("Brand", APPEARANCE);
+		expect((await presets.list())[0]?.forNewProjects).toBeUndefined();
 	});
 
 	it("rejects a taken name with NAME_TAKEN on create and rename", async () => {

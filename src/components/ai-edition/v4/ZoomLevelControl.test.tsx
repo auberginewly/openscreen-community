@@ -73,7 +73,7 @@ describe("ZoomLevelControl", () => {
 		updateZoomCustomScale.mockClear();
 	});
 
-	it("renders four presets, labelled with the table value, current one pressed", () => {
+	it("renders the selected preset without repeating its value in the custom-scale field", () => {
 		const { buttons, field } = renderControl(3);
 		expect(buttons.map((b) => b.textContent)).toEqual(
 			([2, 3, 4, 5] as const).map((d) => `${ZOOM_DEPTH_SCALES[d]}×`),
@@ -84,7 +84,8 @@ describe("ZoomLevelControl", () => {
 			"false",
 			"false",
 		]);
-		expect(field).toHaveAttribute("placeholder", "1.8×");
+		expect(field).toBeInTheDocument();
+		expect(field).toHaveAttribute("placeholder", "");
 	});
 
 	// The ends of the table and every custom level live in the field, not the row.
@@ -121,6 +122,42 @@ describe("ZoomLevelControl", () => {
 		expect(toastError).toHaveBeenCalledWith("zoom.customScaleRange:1,5");
 		expect(updateZoomCustomScale).not.toHaveBeenCalled();
 		expect(updateZoomDepth).not.toHaveBeenCalled();
+	});
+
+	it("hides the levels that would blur this clip, and refuses them typed", () => {
+		const updateZoomDepth = vi.fn(async (_id: string, _depth: ZoomDepth) => true);
+		render(
+			<ZoomLevelControl
+				region={{ id: "z1", depth: 3 }}
+				tl={{ updateZoomDepth, updateZoomCustomScale }}
+				maxScale={2.5}
+			/>,
+		);
+		expect(screen.getAllByRole("button")).toHaveLength(3);
+
+		const field = screen.getByRole("textbox", { name: "zoom.customScale" });
+		fireEvent.change(field, { target: { value: "3" } });
+		fireEvent.blur(field);
+		expect(toastError).toHaveBeenCalledWith("zoom.customScaleRange:1,2.5");
+		expect(updateZoomCustomScale).not.toHaveBeenCalled();
+		expect(updateZoomDepth).not.toHaveBeenCalled();
+	});
+
+	it("drops the row when no preset is within reach", () => {
+		render(
+			<ZoomLevelControl
+				region={{ id: "z1", depth: 1 }}
+				tl={{ updateZoomDepth: vi.fn(), updateZoomCustomScale }}
+				maxScale={1.3}
+			/>,
+		);
+		expect(screen.queryByRole("group", { name: "zoom.level" })).toBeNull();
+		expect(screen.getByRole("textbox", { name: "zoom.customScale" })).toBeInTheDocument();
+	});
+
+	it("offers every level when all are within reach", () => {
+		renderControl(3);
+		expect(screen.getAllByRole("button")).toHaveLength(4);
 	});
 
 	it("ignores an unparseable draft without touching the region", () => {

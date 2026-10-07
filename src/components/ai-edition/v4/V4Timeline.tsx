@@ -2,6 +2,7 @@ import {
 	AudioLines,
 	Clock,
 	Crosshair,
+	Eraser,
 	Loader2,
 	Maximize2,
 	MessageSquare,
@@ -10,7 +11,6 @@ import {
 	Pencil,
 	Scissors,
 	Sparkles,
-	SplitSquareHorizontal,
 	Trash2,
 	Wand2,
 	ZoomIn,
@@ -542,7 +542,7 @@ const AudioLanePill = memo(function AudioLanePill({
 					e.nativeEvent.stopPropagation();
 					onSelect(track.id);
 				}}
-				title={`${label} — ${slipHint}`}
+				title={`${label}\n${slipHint}`}
 			>
 				<span
 					className={styles.lanePillHandle}
@@ -606,8 +606,6 @@ export function V4Timeline({
 	videoSources = [],
 	playing,
 	onTogglePlay,
-	onPrevClip,
-	onNextClip,
 	onEditClip,
 	onAddVoiceover,
 }: {
@@ -618,8 +616,6 @@ export function V4Timeline({
 	videoSources?: VideoSource[];
 	playing: boolean;
 	onTogglePlay: () => void;
-	onPrevClip: () => void;
-	onNextClip: () => void;
 	/** Opens the (now single, shell-level) EditClipModal for this clip —
 	 * trim in/out and crop both live there per-clip. */
 	onEditClip: (clip: AxcutClip) => void;
@@ -924,26 +920,46 @@ export function V4Timeline({
 		end: number;
 	} | null>(null);
 
-	// Drag a lane pill to move it (mode "move", keeps duration) or resize one
-	// edge (mode "l"/"r"). Zoom/speed/annotation are timeline-ms; trims map
-	// back to source-seconds through their carrying clip.
+	// A merged pill can be several regions that merely match (#1017), and an edit must reach
+	// only the one the user pointed at, so the pill splits: a click at `atSec` selects the last
+	// region starting at or before it. Without a pointer (keyboard), the pill's first region.
+	// The store still edits every fragment of that region across a clip junction together.
+	// Returns the id selected.
 	const selectPill = useCallback(
-		(pill: LanePill, additive: boolean) => {
-			tl.selectRegion(pill.kind, pill.id, { additive });
+		(pill: LanePill, additive: boolean, atSec?: number): string => {
+			const regions: Record<LanePill["kind"], ReadonlyArray<{ id: string; startMs: number }>> = {
+				annotation: tl.annotationRegions,
+				speed: tl.speedRegions,
+				zoom: tl.zoomRegions,
+				cameraFullscreen: tl.cameraFullscreenRegions,
+				// Nothing to edit on a trim but its span, and a span edit moves the whole pill.
+				trim: [],
+			};
+			const atMs = (atSec ?? Number.NaN) * 1000;
+			const [pointed] = regions[pill.kind]
+				.filter((r) => pill.sourceIds.includes(r.id) && r.startMs <= atMs)
+				.sort((a, b) => b.startMs - a.startMs);
+			const id = pointed?.id ?? pill.id;
+			tl.selectRegion(pill.kind, id, { additive });
+			return id;
 		},
 		[tl],
 	);
 
+	// Drag a lane pill to move it (mode "move", keeps duration) or resize one
+	// edge (mode "l"/"r"). Zoom/speed/annotation are timeline-ms; trims map
+	// back to source-seconds through their carrying clip.
 	const startPillDrag = useCallback(
 		(e: ReactPointerEvent, pill: LanePill, dragMode: "move" | "l" | "r") => {
 			e.preventDefault();
 			e.stopPropagation();
-			selectPill(pill, e.shiftKey);
 			// Scale drag deltas against the canvas (full zoomed timeline) width, so a
 			// drag tracks the cursor exactly regardless of padding, scrollbar or zoom.
 			const el = canvasRef.current;
 			if (!el) return;
 			const r = el.getBoundingClientRect();
+			// A move rebuilds the pill as one region that keeps this id, so the selection survives.
+			const grabbed = selectPill(pill, e.shiftKey, ((e.clientX - r.left) / r.width) * total);
 			const startX = e.clientX;
 			const dur = pill.end - pill.start;
 			// A trim can span several clips; it's stored as one source-time entry per
@@ -985,12 +1001,12 @@ export function V4Timeline({
 			const apply = async (start: number, end: number): Promise<void> => {
 				const s = Math.max(0, Math.min(end - MIN_REGION_SEC, start));
 				const en = Math.min(total, Math.max(s + MIN_REGION_SEC, end));
-				if (pill.kind === "zoom") await tl.updateZoomSpan(pill.id, s * 1000, en * 1000);
-				else if (pill.kind === "speed") await tl.updateSpeedSpan(pill.id, s * 1000, en * 1000);
+				if (pill.kind === "zoom") await tl.updateZoomSpan(grabbed, s * 1000, en * 1000);
+				else if (pill.kind === "speed") await tl.updateSpeedSpan(grabbed, s * 1000, en * 1000);
 				else if (pill.kind === "annotation")
-					await tl.updateAnnotationSpan(pill.id, s * 1000, en * 1000);
+					await tl.updateAnnotationSpan(grabbed, s * 1000, en * 1000);
 				else if (pill.kind === "cameraFullscreen")
-					await tl.updateCameraFullscreenSpan(pill.id, s * 1000, en * 1000);
+					await tl.updateCameraFullscreenSpan(grabbed, s * 1000, en * 1000);
 				else {
 					// Trims are stored in source-time per asset but manipulated on the
 					// timeline like every other pill. Ventilate the new span across the
@@ -1530,15 +1546,32 @@ export function V4Timeline({
 		[clips, tl],
 	);
 
-	const tools: Array<{ id: ToolId; label: string; icon: React.ReactNode }> = [
-		{ id: "cut", label: t("buttons.addTrim"), icon: <SplitSquareHorizontal size={16} /> },
-		{ id: "comment", label: t("buttons.addAnnotation"), icon: <MessageSquare size={16} /> },
-		{ id: "speed", label: t("buttons.addSpeed"), icon: <Clock size={16} /> },
+	// `shortcut` is the user's live binding, shown as the tooltip's chip. The strings carry no key:
+	// these actions can be remapped, and a key written into a translation would then lie.
+	const tools: Array<{ id: ToolId; label: string; shortcut: string; icon: React.ReactNode }> = [
+		{
+			id: "cut",
+			label: t("buttons.addTrim"),
+			shortcut: formatBinding(shortcuts.addTrim, isMac),
+			icon: <Scissors size={16} />,
+		},
+		{
+			id: "comment",
+			label: t("buttons.addAnnotation"),
+			shortcut: formatBinding(shortcuts.addAnnotation, isMac),
+			icon: <MessageSquare size={16} />,
+		},
+		{
+			id: "speed",
+			label: t("buttons.addSpeed"),
+			shortcut: formatBinding(shortcuts.addSpeed, isMac),
+			icon: <Clock size={16} />,
+		},
 	];
 
 	// Auto-enhance option 1 — the deterministic cursor-telemetry auto-zoom
-	// (ported from main; NOT AI). Reads the recorded cursor movement and drops
-	// zoom-ins on the dwell moments.
+	// (ported from main; NOT AI). Reads the clicks recorded with each take and
+	// plans zooms around them.
 	//
 	// Telemetry belongs to a RECORDING, not to a clip: it is fetched per asset and read in
 	// that asset's source time. Projecting it onto the ruler is `buildAutoZoomSuggestionsForClips`'
@@ -1598,8 +1631,9 @@ export function V4Timeline({
 		useChatPromptBus.getState().submit(AI_ENHANCE_PROMPT);
 	}, []);
 
-	const isPillSelected = (id: string) =>
-		tl.selection?.id === id || tl.multiSelection.some((m) => m.id === id);
+	// Any region under the pill: a click selects the one it lands on, not always the first.
+	const isPillSelected = (p: LanePill) =>
+		p.sourceIds.some((id) => tl.selection?.id === id || tl.multiSelection.some((m) => m.id === id));
 	// Optimistic preview: during a clip-reorder drag, slide each region pill by
 	// the same amount as the clip it sits on — mirroring the clip transforms so
 	// zoom/speed/annotation/trim pills travel with their content in real time,
@@ -1648,7 +1682,7 @@ export function V4Timeline({
 				tabIndex={seg.interactive ? 0 : undefined}
 				className={`${styles.lanePill} ${laneOf(p.kind)}${
 					compact ? ` ${styles.lanePillCompact}` : ""
-				}${seg.interactive && isPillSelected(p.id) ? ` ${styles.lanePillSel}` : ""}`}
+				}${seg.interactive && isPillSelected(p) ? ` ${styles.lanePillSel}` : ""}`}
 				style={{
 					left: `${pctAt(seg.segStart)}%`,
 					// Measured on the expanded ruler at BOTH ends: a region straddling a pause
@@ -1686,7 +1720,9 @@ export function V4Timeline({
 							}
 						: undefined
 				}
-				title={p.label}
+				// The name on hover only where the pill cannot show it: a pill that draws its own
+				// label would repeat it.
+				title={seg.showContent && roomForLabel ? undefined : p.label}
 			>
 				{seg.interactive ? (
 					<span
@@ -1812,7 +1848,12 @@ export function V4Timeline({
 											type="button"
 											className={styles.tlToolBtn}
 											aria-label={t("toolbar.autoEnhance")}
-											disabled={autoBusy}
+											// `aria-disabled`, not `disabled`, so the tooltip still opens while a pass runs; the
+											// click must not open the menu meanwhile (Radix skips a prevented click).
+											aria-disabled={autoBusy || undefined}
+											onClick={(e) => {
+												if (autoBusy) e.preventDefault();
+											}}
 										>
 											{autoBusy ? (
 												<Loader2 className="animate-spin" size={16} />
@@ -1873,7 +1914,7 @@ export function V4Timeline({
 							<span className={styles.tlToolSep} aria-hidden />
 							{tools.map((tool) => (
 								<Fragment key={tool.id}>
-									<Tooltip content={tool.label}>
+									<Tooltip content={tool.label} shortcut={tool.shortcut}>
 										<button
 											type="button"
 											className={styles.tlToolBtn}
@@ -1898,7 +1939,10 @@ export function V4Timeline({
 								    button's menu right next to it. */}
 									{tool.id === "comment" ? (
 										<Popover open={audioMenuOpen} onOpenChange={setAudioMenuOpen}>
-											<Tooltip content={t("toolbar.addAudioTooltip")}>
+											<Tooltip
+												content={t("toolbar.addAudioTooltip")}
+												shortcut={formatBinding(shortcuts.addAudio, isMac)}
+											>
 												<PopoverTrigger asChild>
 													<button
 														type="button"
@@ -1963,7 +2007,10 @@ export function V4Timeline({
 									) : null}
 								</Fragment>
 							))}
-							<Tooltip content={t("buttons.addZoom")}>
+							<Tooltip
+								content={t("buttons.addZoom")}
+								shortcut={formatBinding(shortcuts.addZoom, isMac)}
+							>
 								<button
 									type="button"
 									className={styles.tlToolBtn}
@@ -1973,35 +2020,53 @@ export function V4Timeline({
 									<ZoomIn size={16} />
 								</button>
 							</Tooltip>
-							<Tooltip
-								content={t(
-									settings.autoFocusAll ? "buttons.autoFocusAllOn" : "buttons.autoFocusAllOff",
-								)}
-							>
+							{/* One name and one tip for both states: `aria-pressed` carries which one it is. */}
+							<Tooltip content={t("buttons.autoFocusAllTip")}>
 								<button
 									type="button"
 									className={styles.tlToolBtn}
 									aria-pressed={settings.autoFocusAll}
-									aria-label={t(
-										settings.autoFocusAll ? "buttons.autoFocusAllOn" : "buttons.autoFocusAllOff",
-									)}
+									aria-label={t("buttons.autoFocusAll")}
 									onClick={() => void setSettings({ autoFocusAll: !settings.autoFocusAll })}
 								>
 									<Crosshair size={16} />
 								</button>
 							</Tooltip>
-							<Tooltip content={t("buttons.addCameraFullscreen")}>
-								<button
-									type="button"
-									className={styles.tlToolBtn}
-									aria-label={t("buttons.addCameraFullscreen")}
-									disabled={!hasAnyCamera}
-									style={!hasAnyCamera ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
-									onClick={() => void tl.addCameraFullscreen(newRegionDurationSec())}
+							{/* Absent, not greyed out, in a project with no camera: nothing to show full screen. */}
+							{hasAnyCamera ? (
+								<Tooltip
+									content={t("buttons.addCameraFullscreen")}
+									shortcut={formatBinding(shortcuts.addCameraFullscreen, isMac)}
 								>
-									<Maximize2 size={16} />
-								</button>
-							</Tooltip>
+									<button
+										type="button"
+										className={styles.tlToolBtn}
+										aria-label={t("buttons.addCameraFullscreen")}
+										onClick={() => void tl.addCameraFullscreen(newRegionDurationSec())}
+									>
+										<Maximize2 size={16} />
+									</button>
+								</Tooltip>
+							) : null}
+							{/* Last, behind a divider: every button before it adds a region, this one
+							    clears them. Absent with its divider, not greyed out, when there is
+							    nothing to clear. One write in the store, so one Ctrl+Z restores every
+							    region. */}
+							{tl.hasEditRegions ? (
+								<>
+									<span className={styles.tlToolSep} aria-hidden />
+									<Tooltip content={t("buttons.clearTimeline")}>
+										<button
+											type="button"
+											className={styles.tlToolBtn}
+											aria-label={t("buttons.clearTimeline")}
+											onClick={() => void tl.clearTimeline()}
+										>
+											<Eraser size={16} />
+										</button>
+									</Tooltip>
+								</>
+							) : null}
 						</div>
 					</TooltipProvider>
 				) : (
@@ -2028,15 +2093,15 @@ export function V4Timeline({
 				)}
 				{showLanes ? (
 					<>
-						<TransportBar
-							playing={playing}
-							overrideTimeSec={scrubbingTimeSec}
-							clips={clips}
-							onTogglePlay={onTogglePlay}
-							onPrevClip={onPrevClip}
-							onNextClip={onNextClip}
-							onSeek={setCurrentTime}
-						/>
+						{/* Its own provider, like the tool strip above: TransportBar has a tooltip too. */}
+						<TooltipProvider>
+							<TransportBar
+								playing={playing}
+								overrideTimeSec={scrubbingTimeSec}
+								clips={clips}
+								onTogglePlay={onTogglePlay}
+							/>
+						</TooltipProvider>
 						<div className={styles.tlHints}>
 							<span className={styles.tlHint}>
 								<span className={styles.tlKbd}>Shift+Scroll</span> {t("labels.pan")}
@@ -2085,22 +2150,46 @@ export function V4Timeline({
 							<>
 								{/* An empty lane advertises the shortcut that fills it ("Press A to add
 								    annotation") rather than restating that it is empty — the same hint
-								    strings the pre-v4 timeline used, so the keys stay translated. */}
+								    strings the pre-v4 timeline used, so the keys stay translated. The key
+								    is the live binding, formatted like the toolbar tooltip's chip, so a
+								    rebind in the shortcuts dialog moves the hint with it (#966). */}
 								<div className={styles.tlLane}>
-									{renderPills(annPills, t("hints.pressAnnotation"))}
+									{renderPills(
+										annPills,
+										t("hints.pressAnnotation", {
+											key: formatBinding(shortcuts.addAnnotation, isMac),
+										}),
+									)}
 								</div>
 								<div className={styles.tlLane}>
-									{renderPills(speedPills, t("hints.pressSpeed"))}
+									{renderPills(
+										speedPills,
+										t("hints.pressSpeed", { key: formatBinding(shortcuts.addSpeed, isMac) }),
+									)}
 								</div>
-								<div className={styles.tlLane}>{renderPills(trimPills, t("hints.pressTrim"))}</div>
-								<div className={styles.tlLane}>{renderPills(zoomPills, t("hints.pressZoom"))}</div>
+								<div className={styles.tlLane}>
+									{renderPills(
+										trimPills,
+										t("hints.pressTrim", { key: formatBinding(shortcuts.addTrim, isMac) }),
+									)}
+								</div>
+								<div className={styles.tlLane}>
+									{renderPills(
+										zoomPills,
+										t("hints.pressZoom", { key: formatBinding(shortcuts.addZoom, isMac) }),
+									)}
+								</div>
 								<div className={styles.tlLane}>
 									{/* Advertising "Press C" on a project with no webcam invites a keystroke
 									    that `addCameraFullscreen` now refuses (#353). The toolbar button is
 									    already disabled; this keeps the lane from contradicting it. */}
 									{renderPills(
 										cameraFullscreenPills,
-										hasAnyCamera ? t("hints.pressCameraFullscreen") : ts("layout.noWebcam"),
+										hasAnyCamera
+											? t("hints.pressCameraFullscreen", {
+													key: formatBinding(shortcuts.addCameraFullscreen, isMac),
+												})
+											: ts("layout.noWebcam"),
 									)}
 								</div>
 								{/* Imported audio tracks (issue #350). Always shown, like every other
@@ -2124,7 +2213,10 @@ export function V4Timeline({
 											className={styles.laneEmpty}
 											style={{ left: `${nav.start * 100}%`, width: `${navSpan * 100}%` }}
 										>
-											{t("hints.pressAudio")}
+											{t("hints.pressAudio", {
+												audioKey: formatBinding(shortcuts.addAudio, isMac),
+												voiceoverKey: formatBinding(shortcuts.addVoiceover, isMac),
+											})}
 										</span>
 									) : (
 										// One pill per user-visible track: the document stores one
@@ -2164,7 +2256,9 @@ export function V4Timeline({
 													onStartDrag={startAudioDrag}
 													onSelect={tl.selectAudioTrack}
 													label={track.label || asset?.label || ts("audioTrack.defaultLabel")}
-													slipHint={ts("audioTrack.slipHint")}
+													slipHint={ts("audioTrack.slipHint", {
+														modifier: isMac ? "Option" : "Alt",
+													})}
 													slipArmed={slipArmed}
 													outputGain={audioGainScalar(settings.audioGainDb)}
 													ghost={((g) =>
@@ -2363,23 +2457,12 @@ export function V4Timeline({
 			    on screen at once, and there is nothing to zoom INTO without lanes. */}
 			{showLanes ? (
 				<div ref={navRef} className={styles.tlNav}>
-					{/* The whole timeline in miniature: where the footage is, so the window reads as
-					    a view onto it rather than as a bare scrollbar. */}
-					<div className={styles.tlNavTrack} aria-hidden>
-						{clips.map((c) => (
-							<span
-								key={c.id}
-								className={styles.tlNavClip}
-								style={{
-									left: `${pctOf(c.timelineStartSec).toFixed(2)}%`,
-									width: `${pctOf(c.timelineEndSec - c.timelineStartSec).toFixed(2)}%`,
-								}}
-							/>
-						))}
-					</div>
+					<div className={styles.tlNavTrack} aria-hidden />
 					<div
 						className={styles.tlNavWindow}
-						title={t("labels.pan")}
+						// Whole timeline in view: the thumb goes quiet (see .tlNavWindow[data-full]).
+						data-full={navSpan >= 0.999 || undefined}
+						title={t("labels.panTip")}
 						style={{
 							left: `${(nav.start * 100).toFixed(2)}%`,
 							width: `${((nav.end - nav.start) * 100).toFixed(2)}%`,
@@ -2391,13 +2474,13 @@ export function V4Timeline({
 						<span
 							className={styles.tlNavGrip}
 							data-edge="start"
-							title={t("labels.zoom")}
+							title={t("labels.zoomTip")}
 							onPointerDown={(e) => startNavDrag("left", e)}
 						/>
 						<span
 							className={styles.tlNavGrip}
 							data-edge="end"
-							title={t("labels.zoom")}
+							title={t("labels.zoomTip")}
 							onPointerDown={(e) => startNavDrag("right", e)}
 						/>
 					</div>

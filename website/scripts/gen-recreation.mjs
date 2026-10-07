@@ -113,6 +113,12 @@ const { buildClipSection, isSilenceWord, SILENCE_THRESHOLD_SEC } = await appModu
 const { CURSOR_THEMES, DEFAULT_CURSOR_THEME_ID, resolveCursorSprites } = await appModule(
 	"src/lib/cursor/cursorThemes.ts",
 );
+// The empty-lane hints take their key through {{key}} since the app learned to
+// show the bound shortcut (358c3383). The recreation shows a fresh install, so
+// the default bindings, formatted the way the app formats them. No import of
+// its own, so it loads as-is like cursorThemes.ts.
+const { DEFAULT_SHORTCUTS, formatBinding } = await appModule("src/lib/shortcuts.ts");
+const shortcutKey = (action) => ({ key: formatBinding(DEFAULT_SHORTCUTS[action], true) });
 
 // ── locale access that fails loudly ─────────────────────────────────────
 const locale = (ns) =>
@@ -406,11 +412,36 @@ const trimPills = trims.map((r) => ({
 }));
 
 const LANE_ORDER = [
-	{ id: "annotation", hintKey: "timeline:hints.pressAnnotation", pills: [] },
-	{ id: "speed", hintKey: "timeline:hints.pressSpeed", pills: [] },
-	{ id: "trim", hintKey: "timeline:hints.pressTrim", pills: trimPills },
-	{ id: "zoom", hintKey: "timeline:hints.pressZoom", pills: zoomPills },
-	{ id: "cameraFullscreen", hintKey: "timeline:hints.pressCameraFullscreen", pills: [] },
+	{
+		id: "annotation",
+		hintKey: "timeline:hints.pressAnnotation",
+		hintVars: shortcutKey("addAnnotation"),
+		pills: [],
+	},
+	{
+		id: "speed",
+		hintKey: "timeline:hints.pressSpeed",
+		hintVars: shortcutKey("addSpeed"),
+		pills: [],
+	},
+	{
+		id: "trim",
+		hintKey: "timeline:hints.pressTrim",
+		hintVars: shortcutKey("addTrim"),
+		pills: trimPills,
+	},
+	{
+		id: "zoom",
+		hintKey: "timeline:hints.pressZoom",
+		hintVars: shortcutKey("addZoom"),
+		pills: zoomPills,
+	},
+	{
+		id: "cameraFullscreen",
+		hintKey: "timeline:hints.pressCameraFullscreen",
+		hintVars: shortcutKey("addCameraFullscreen"),
+		pills: [],
+	},
 ];
 
 // Cross-check against the document rather than trusting the table above: a lane
@@ -433,7 +464,7 @@ for (const lane of LANE_ORDER) {
 
 const LANES = LANE_ORDER.map((lane) => ({
 	id: lane.id,
-	hint: lane.pills.length === 0 ? t(lane.hintKey) : null,
+	hint: lane.pills.length === 0 ? t(lane.hintKey, lane.hintVars) : null,
 	pills: lane.pills,
 }));
 const PILLS = LANES.flatMap((lane) => lane.pills);
@@ -706,16 +737,48 @@ const EFFECTS = {
 };
 
 /**
- * Every slider and toggle on the two panels, at the document's own settings and
- * with the range, suffix and precision RightPanes.tsx gives it.
+ * Every slider, toggle and row of named levels on the two panels, at the
+ * document's own settings and with the range, suffix and precision RightPanes.tsx
+ * gives it.
  *
- * The app stores most of these as fractions and displays them scaled — cursor
- * size is `size * 10` over 5–100 with one decimal and no suffix, smoothing is
- * `smoothing * 100` with a per-cent sign — so a panel that showed the stored
- * number would be wrong in a way that looks entirely plausible. The scaling
- * lives here, next to the value it scales.
+ * The app stores most of these as fractions and displays them scaled — smoothing
+ * is `smoothing * 100` with a per-cent sign, cursor size is shown as no number at
+ * all — so a panel that showed the stored number would be wrong in a way that
+ * looks entirely plausible. The scaling lives here, next to the value it scales.
  */
 const le = doc.legacyEditor;
+
+/**
+ * The named levels RightPanes.tsx offers where a number would mean nothing to a
+ * user (shadow, click bounce). Lifted as source, like `wallpaper.ts` below: that
+ * file reaches React and the `@/` alias and cannot be imported.
+ */
+const RIGHT_PANES_SRC = readFileSync(
+	resolve(APP, "src/components/ai-edition/RightPanes.tsx"),
+	"utf8",
+);
+function liftLevels(name) {
+	const body = new RegExp(`const ${name} = \\[([\\s\\S]*?)\\] as const;`).exec(
+		RIGHT_PANES_SRC,
+	)?.[1];
+	const levels = [...(body ?? "").matchAll(/value: ([\d.]+), labelKey: "([\w.]+)"/g)].map((m) => ({
+		value: Number(m[1]),
+		label: t(`settings:${m[2]}`),
+	}));
+	if (levels.length < 2) throw new Error(`could not lift ${name} out of RightPanes.tsx`);
+	return levels;
+}
+/** The level whose value is nearest. The document predates the rows: its shadow
+ *  (0.35) sits between two levels, where the app presses no button at all. A row
+ *  with nothing pressed reads as broken on a page, so the page presses the
+ *  nearest one and says so here. */
+const nearestLevel = (levels, v) =>
+	levels.reduce((a, b) => (Math.abs(b.value - v) < Math.abs(a.value - v) ? b : a)).value;
+
+const { SETTING_BOUNDS, DEFAULT_PROJECT_APPEARANCE, readBackgroundBlur } = await appModule(
+	"src/lib/projectDefaults.ts",
+);
+const { ROUNDNESS_SLIDER_MAX_PX } = await appModule("src/native/paramUnits.ts");
 const defaultsSrc = [
 	[
 		"src/components/video-editor/types.ts",
@@ -746,10 +809,22 @@ const slider = (label, value, min, max, suffix, display) => ({
 	display,
 });
 
+const blurBg = readBackgroundBlur(le, 0);
+const SHADOW_LEVELS = liftLevels("SHADOW_LEVELS");
+const CLICK_BOUNCE_LEVELS = liftLevels("CLICK_BOUNCE_LEVELS");
+
 const CONTROLS = {
-	// RightPanes.tsx:1443, :1397, :1412, :1427 — Video Effects, in its order.
+	// RightPanes.tsx VideoEffectsPane — the Background section's blur, then the
+	// Frame section (shadow, padding, roundness), then Motion.
+	// The document stores the old `showBlur` switch; the app reads it through
+	// `readBackgroundBlur`, and so does this.
+	blurBg: slider(t("settings:effects.blurBg"), blurBg * 100, 0, 100, "%", asPercent(blurBg)),
+	shadow: {
+		label: t("settings:effects.shadow"),
+		levels: SHADOW_LEVELS,
+		value: nearestLevel(SHADOW_LEVELS, le.shadowIntensity),
+	},
 	padding: slider(t("settings:effects.padding"), le.padding, 0, 100, "%", `${le.padding}%`),
-	blurBg: { label: t("settings:effects.blurBg"), on: le.showBlur },
 	motionBlur: slider(
 		t("settings:effects.motionBlur"),
 		le.motionBlurAmount * 100,
@@ -758,33 +833,26 @@ const CONTROLS = {
 		"%",
 		asPercent(le.motionBlurAmount),
 	),
-	shadow: slider(
-		t("settings:effects.shadow"),
-		le.shadowIntensity * 100,
-		0,
-		100,
-		"%",
-		asPercent(le.shadowIntensity),
-	),
 	roundness: slider(
 		t("settings:effects.roundness"),
 		le.borderRadius,
 		0,
-		64,
+		ROUNDNESS_SLIDER_MAX_PX,
 		"px",
 		`${le.borderRadius}px`,
 	),
-	// RightPanes.tsx:1755 — Cursor. `show` is not in this document, so it is the
+	// RightPanes.tsx CursorPane. `show` is not in this document, so it is the
 	// app's own default rather than a guess.
 	cursorShow: { label: t("settings:cursor.show"), on: defaultBool("cursorShow") },
-	cursorTheme: { label: t("settings:cursor.theme"), value: le.cursorTheme },
+	// Over SETTING_BOUNDS, with no value shown: the slider has no unit, and the
+	// app does not print a number nobody can act on.
 	cursorSize: slider(
 		t("settings:cursor.size"),
-		le.cursorSize * 10,
-		5,
-		100,
+		le.cursorSize,
+		SETTING_BOUNDS.cursorSize[0],
+		SETTING_BOUNDS.cursorSize[1],
 		"",
-		(le.cursorSize * 10).toFixed(1),
+		"",
 	),
 	smoothing: slider(
 		t("settings:cursor.smoothing"),
@@ -794,11 +862,18 @@ const CONTROLS = {
 		"%",
 		asPercent(le.cursorSmoothing),
 	),
+	// Not in this document either: the app's default level.
+	clickBounce: {
+		label: t("settings:cursor.clickBounce"),
+		levels: CLICK_BOUNCE_LEVELS,
+		value: DEFAULT_PROJECT_APPEARANCE.cursor.clickBounce,
+	},
 };
 
 /**
- * The cursor packs the Cursor panel's picker shows, and the two macOS shapes the
- * demonstration pointer swaps to.
+ * The cursor art the page draws: the application's default pack, and the two
+ * macOS shapes the demonstration pointer swaps to. The editor shows no theme
+ * picker while the default is the only pack it ships, so the page shows none.
  *
  * Every one is a pack the application actually ships in `public/cursors/`, with
  * the hotspot the application actually uses — which is the whole reason to read
@@ -810,18 +885,7 @@ const CONTROLS = {
  * arrow tip, and reads as the sprite's right edge if taken for a fraction — so
  * the application's own `resolveCursorSprites` does the conversion here too.
  */
-const CURSOR_PICKER = [
-	DEFAULT_CURSOR_THEME_ID,
-	"pink-glossy-arrow-and-hand-3d",
-	"spring-gradient",
-	"black-and-rainbow-stroke-gradient-animated",
-	"among-us-sus-knife-and-red-animated",
-	"hollow-knight-and-game-arrow",
-	"mickey-mouse-black-hand-inflated-glove",
-	"sanrio-kuromi-skull-arrow",
-	"old-roblox",
-	"pokemon-neon-gengar",
-];
+const CURSOR_PACKS = [DEFAULT_CURSOR_THEME_ID];
 
 const round4 = (v) => Number(v.toFixed(4));
 
@@ -847,8 +911,7 @@ function cursorSprite(id, kind) {
 }
 
 const CURSORS = {
-	themeCount: CURSOR_THEMES.length + 1,
-	themes: CURSOR_PICKER.map((id, i) => ({
+	themes: CURSOR_PACKS.map((id, i) => ({
 		id,
 		...cursorSprite(id, "arrow"),
 		src: `/img/cursors/${String(i).padStart(2, "0")}-arrow.png`,
@@ -865,11 +928,16 @@ const CURSORS = {
 const PANELS = {
 	background: {
 		title: t("settings:background.title"),
+		// WallpaperPicker's order: image, gradient, colour.
 		tabs: [
 			t("settings:background.image"),
-			t("settings:background.color"),
 			t("settings:background.gradient"),
+			t("settings:background.color"),
 		],
+		motion: t("settings:background.motion"),
+		motions: ["motionNone", "motionDrift", "motionAurora", "motionWaves"].map((k) =>
+			t(`settings:background.${k}`),
+		),
 		uploadCustom: t("settings:background.uploadCustom"),
 		wallpaperCount: WALLPAPER_COUNT,
 		swatchLabels: Array.from({ length: WALLPAPER_COUNT }, (_, i) =>
@@ -878,6 +946,8 @@ const PANELS = {
 	},
 	effects: {
 		title: t("settings:effects.title"),
+		frame: t("settings:effects.frame"),
+		motion: t("settings:effects.motion"),
 		padding: t("settings:effects.padding"),
 		blurBg: t("settings:effects.blurBg"),
 		motionBlur: t("settings:effects.motionBlur"),
@@ -887,9 +957,9 @@ const PANELS = {
 	cursor: {
 		title: t("settings:cursor.title"),
 		show: t("settings:cursor.show"),
-		theme: t("settings:cursor.theme"),
 		size: t("settings:cursor.size"),
 		smoothing: t("settings:cursor.smoothing"),
+		clickBounce: t("settings:cursor.clickBounce"),
 	},
 };
 
@@ -1015,7 +1085,7 @@ const PROVENANCE = [
 	})),
 	...LANES.filter((l) => l.hint).map((l) => ({
 		shown: l.hint,
-		source: `timeline.json hints.press${l.id[0].toUpperCase()}${l.id.slice(1)} — rendered because the document holds no ${l.id} regions`,
+		source: `computed: timeline.json hints.press${l.id[0].toUpperCase()}${l.id.slice(1)} with {{key}} = the default binding (shortcuts.ts DEFAULT_SHORTCUTS, formatBinding) — rendered because the document holds no ${l.id} regions`,
 	})),
 	{
 		shown: RULER.variants[0].labels.map((l) => l.text).join(" "),
@@ -1048,11 +1118,11 @@ const PROVENANCE = [
 	},
 	{
 		shown: PANELS.background.tabs[1],
-		source: "src/i18n/locales/en/settings.json → background.color",
+		source: "src/i18n/locales/en/settings.json → background.gradient",
 	},
 	{
 		shown: PANELS.background.tabs[2],
-		source: "src/i18n/locales/en/settings.json → background.gradient",
+		source: "src/i18n/locales/en/settings.json → background.color",
 	},
 	{
 		shown: PANELS.background.uploadCustom,
@@ -1076,12 +1146,30 @@ const PROVENANCE = [
 	},
 	{ shown: PANELS.cursor.title, source: "src/i18n/locales/en/settings.json → cursor.title" },
 	{ shown: PANELS.cursor.show, source: "src/i18n/locales/en/settings.json → cursor.show" },
-	{ shown: PANELS.cursor.theme, source: "src/i18n/locales/en/settings.json → cursor.theme" },
 	{ shown: PANELS.cursor.size, source: "src/i18n/locales/en/settings.json → cursor.size" },
 	{
 		shown: PANELS.cursor.smoothing,
 		source: "src/i18n/locales/en/settings.json → cursor.smoothing",
 	},
+	{
+		shown: PANELS.cursor.clickBounce,
+		source: "src/i18n/locales/en/settings.json → cursor.clickBounce",
+	},
+	{
+		shown: PANELS.background.motion,
+		source: "src/i18n/locales/en/settings.json → background.motion",
+	},
+	...PANELS.background.motions.map((shown) => ({
+		shown,
+		source: "src/i18n/locales/en/settings.json → background.motion{None,Drift,Aurora,Waves}",
+	})),
+	{ shown: PANELS.effects.frame, source: "src/i18n/locales/en/settings.json → effects.frame" },
+	{ shown: PANELS.effects.motion, source: "src/i18n/locales/en/settings.json → effects.motion" },
+	...[...CONTROLS.shadow.levels, ...CONTROLS.clickBounce.levels].map((level) => ({
+		shown: level.label,
+		source:
+			"lifted: SHADOW_LEVELS / CLICK_BOUNCE_LEVELS in RightPanes.tsx, labels from settings.json",
+	})),
 ];
 
 // A string that claims a locale source but is not in the locale files is the
@@ -1266,8 +1354,8 @@ export const EFFECTS = ${lit(EFFECTS)} as const;
  *  and suffixed the way RightPanes.tsx scales and suffixes it. */
 export const CONTROLS = ${lit(CONTROLS)} as const;
 
-/** The cursor packs the picker shows, each with the application's own hotspot,
- *  normalised to a fraction of the sprite. */
+/** The cursor art the page draws, each sprite with the application's own
+ *  hotspot, normalised to a fraction of the sprite. */
 export const CURSORS = ${lit(CURSORS)} as const;
 
 export const TRANSPORT = ${lit(TRANSPORT)} as const;

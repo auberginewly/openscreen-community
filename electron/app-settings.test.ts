@@ -40,6 +40,28 @@ describe("app settings store", () => {
 		}
 	});
 
+	// getopenscreen/openscreen#723 — the auto-zoom choice has to survive a restart, and a
+	// file written before the preference existed must read as on rather than as off.
+	it("persists the auto-zoom choice and reads a missing key as on", () => {
+		const dir = temp();
+		const file = path.join(dir, "recording-settings.json");
+		const store = new AppSettingsStore(dir);
+		expect(store.getSnapshot().recording.autoZoomEnabled).toBe(true);
+		expect(
+			store.setRecordingPreferences({ autoZoomEnabled: false }).recording.autoZoomEnabled,
+		).toBe(false);
+		expect(JSON.parse(readFileSync(file, "utf8"))).toMatchObject({ autoZoomEnabled: false });
+		expect(new AppSettingsStore(dir).getSnapshot().recording.autoZoomEnabled).toBe(false);
+
+		writeFileSync(file, JSON.stringify({ micEnabled: true }), "utf8");
+		expect(store.getSnapshot().recording.autoZoomEnabled).toBe(true);
+		writeFileSync(file, JSON.stringify({ autoZoomEnabled: "false" }), "utf8");
+		expect(store.getSnapshot().recording.autoZoomEnabled).toBe(true);
+		expect(() => store.setRecordingPreferences({ autoZoomEnabled: "no" as never })).toThrow(
+			TypeError,
+		);
+	});
+
 	it("stores the last source beside the recording preferences", () => {
 		const dir = temp();
 		const store = new AppSettingsStore(dir);
@@ -64,6 +86,9 @@ describe("app settings store", () => {
 		const store = new AppSettingsStore(dir);
 		store.setRecordingPreferences({ micEnabled: true });
 		expect(() => store.setRecordingPreferences({ micEnabled: "yes" as never })).toThrow(TypeError);
+		expect(() => store.setRecordingPreferences({ hideDesktopIcons: 1 as never })).toThrow(
+			TypeError,
+		);
 		expect(store.getSnapshot().recording.micEnabled).toBe(true);
 		const missing = new AppSettingsStore(path.join(dir, "missing"));
 		expect(() => missing.setRecordingPreferences({ micEnabled: true })).toThrow();
@@ -103,5 +128,41 @@ describe("app settings store", () => {
 		store.recordSuccessfulExport();
 		store.dismissStarPrompt();
 		expect(store.getSnapshot().recording).toMatchObject({ micEnabled: true, micDeviceId: "mic" });
+	});
+
+	it("stores a camera quality and rejects one it cannot capture at", () => {
+		const dir = temp();
+		const store = new AppSettingsStore(dir);
+
+		expect(store.setRecordingPreferences({ camQuality: "1080p" }).recording.camQuality).toBe(
+			"1080p",
+		);
+		expect(() => store.setRecordingPreferences({ camQuality: "4320p" as never })).toThrow(
+			TypeError,
+		);
+		expect(store.getSnapshot().recording.camQuality).toBe("1080p");
+	});
+
+	it("leaves the camera quality alone when a patch does not mention it", () => {
+		// Every other window writes narrow patches; a camera toggle from the HUD
+		// must not quietly reset the resolution the user picked.
+		const dir = temp();
+		const store = new AppSettingsStore(dir);
+		store.setRecordingPreferences({ camQuality: "1440p" });
+
+		store.setRecordingPreferences({ camEnabled: true });
+
+		expect(store.getSnapshot().recording.camQuality).toBe("1440p");
+	});
+
+	it("reads a settings file written before the camera had a quality", () => {
+		const dir = temp();
+		writeFileSync(
+			path.join(dir, "recording-settings.json"),
+			JSON.stringify({ micEnabled: true }),
+			"utf8",
+		);
+
+		expect(new AppSettingsStore(dir).getSnapshot().recording.camQuality).toBe("2160p");
 	});
 });

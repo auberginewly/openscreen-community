@@ -3,7 +3,12 @@ import type { AxcutDocument } from "../schema";
 import { ensureDocument } from "../schema";
 import { useProjectStore, waitForDocumentSaves } from "./projectStore";
 
-export type AgentDocumentApplyResult = "applied" | "conflict" | "save-failed" | "no-live-document";
+export type AgentDocumentApplyResult =
+	| "applied"
+	| "conflict"
+	| "save-failed"
+	| "no-live-document"
+	| "timeout";
 
 /**
  * Apply a full document returned by the agent only if the live editor is still
@@ -18,7 +23,7 @@ export async function applyAgentDocumentIfCurrent(
 ): Promise<AgentDocumentApplyResult> {
 	// A manual save may have started before approval without updating the store
 	// yet. Let it settle, then compare against the revision the agent saw.
-	if ((await waitForDocumentSaves()) !== "idle") return "save-failed";
+	if ((await waitForDocumentSaves()) !== "idle") return "timeout";
 	const store = useProjectStore.getState();
 	if (expectedRevision !== undefined && store.revision !== expectedRevision) {
 		return "conflict";
@@ -28,7 +33,7 @@ export async function applyAgentDocumentIfCurrent(
 	// `saveDocument` updates the live store and records one history entry only
 	// after the native save succeeds. Keeping the proposal off screen while the
 	// save is in flight also makes failure and discard truly leave no project edit.
-	if (await store.saveDocument(parsed, { history: true })) {
+	if (await store.saveDocument(parsed, { history: true, rejectSuperseded: true })) {
 		return "applied";
 	}
 	return "save-failed";
@@ -69,12 +74,20 @@ export function createAgentEditReview(
 				try {
 					const result = await applyDocument();
 					review.status =
-						result === "applied" ? "applied" : result === "conflict" ? "conflict" : "failed";
+						result === "timeout"
+							? "proposed"
+							: result === "applied"
+								? "applied"
+								: result === "conflict"
+									? "conflict"
+									: "failed";
 				} catch {
 					review.status = "failed";
 				}
 				return review.status;
-			})();
+			})().finally(() => {
+				inFlight = null;
+			});
 			return inFlight;
 		},
 		discard() {

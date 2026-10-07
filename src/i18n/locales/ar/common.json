@@ -4,6 +4,7 @@
 		"save": "حفظ",
 		"delete": "حذف",
 		"close": "اغلاق",
+		"resetToDefault": "إعادة التعيين إلى القيمة الافتراضية",
 		"share": "مشاركة",
 		"done": "تم",
 		"open": "فتح",
@@ -47,7 +48,8 @@
 		"unhide": "إظهار الكل",
 		"saveDiagnostics": "حفظ التشخيصات",
 		"starOnGithub": "ضع نجمة على GitHub",
-		"permissions": "الأذونات…"
+		"permissions": "الأذونات…",
+		"closeNotification": "إغلاق الإشعار"
 	},
 	"updates": {
 		"available": "يتوفر OpenScreen {{latestVersion}}. الإصدار المثبت هو {{currentVersion}}.",

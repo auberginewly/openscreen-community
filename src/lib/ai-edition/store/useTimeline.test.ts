@@ -2,8 +2,11 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "@/contexts/I18nContext";
+import { DEFAULT_TEXT_PLATE } from "../annotations/background";
+import { type RegionKind, readSpeedRegions } from "../document/timeline";
 import type { AxcutDocument } from "../schema";
-import { axcutSchemaVersion } from "../schema";
+import { axcutSchemaVersion, parseDocumentFile } from "../schema";
+import { coalesceRegionsForRuler } from "../timeline/timelineMap";
 import { useProjectStore } from "./projectStore";
 import { clearHistory, redo, undo } from "./undo";
 import { future, past } from "./undoStack";
@@ -717,6 +720,286 @@ describe("useTimeline.addAnnotation", () => {
 			id: (annotations[0] as { id: string }).id,
 		});
 	});
+
+	it("centres the new text box and puts it on a dark plate that reads on any page", async () => {
+		const { result } = renderTimeline();
+		await act(async () => {
+			await result.current.addAnnotation();
+		});
+		const [annotation] = useProjectStore.getState().document?.annotations ?? [];
+		const { position, size } = annotation as {
+			position: { x: number; y: number };
+			size: { width: number; height: number };
+		};
+		expect([position.x + size.width / 2, position.y + size.height / 2]).toEqual([50, 50]);
+		expect(annotation.style.backgroundColor).toBe(DEFAULT_TEXT_PLATE);
+	});
+});
+
+// The Clear timeline button. Every edit region on every clip, one write; the content stays.
+describe("useTimeline.clearTimeline", () => {
+	type Timeline = ReturnType<typeof useTimeline>;
+	type EditKind = Exclude<RegionKind, "audio">;
+
+	// A Record rather than a list: a new region kind fails to compile here until this suite
+	// decides whether "Clear timeline" takes it. Each adder goes through the real hook, so
+	// every region is schema-valid by construction.
+	const addOf: Record<EditKind, (tl: Timeline) => Promise<unknown>> = {
+		zoom: (tl) => tl.addZoom(),
+		trim: (tl) => tl.addTrim(),
+		annotation: (tl) => tl.addAnnotation(),
+		speed: (tl) => tl.addSpeed(),
+		cameraFullscreen: (tl) => tl.addCameraFullscreen(),
+	};
+	const editKinds = Object.keys(addOf) as EditKind[];
+
+	const regionCounts = (doc: AxcutDocument | null | undefined): Record<EditKind, number> => {
+		const legacy = (doc?.legacyEditor ?? {}) as { cameraFullscreenRegions?: unknown[] };
+		return {
+			zoom: doc?.zoomRanges.length ?? 0,
+			trim: doc?.timeline.trimRanges.length ?? 0,
+			annotation: doc?.annotations.length ?? 0,
+			speed: doc ? readSpeedRegions(doc).length : 0,
+			cameraFullscreen: legacy.cameraFullscreenRegions?.length ?? 0,
+		};
+	};
+	const noRegions: Record<EditKind, number> = {
+		zoom: 0,
+		trim: 0,
+		annotation: 0,
+		speed: 0,
+		cameraFullscreen: 0,
+	};
+
+	// A project holding everything that is NOT an edit: two clips, a webcam, an imported
+	// audio track, a transcript, captions, a pause, and settings in the legacy envelope.
+	const clipA = sampleDoc.timeline.clips[0];
+	const contentDoc: AxcutDocument = {
+		...sampleDoc,
+		assets: [
+			{
+				...sampleDoc.assets[0],
+				// Dimensions filled in so the hook's backfill probe has nothing to do.
+				cameraTrack: {
+					sourcePath: "/tmp/camera.webm",
+					startMs: 0,
+					offsetMs: 0,
+					visible: true,
+					width: 1280,
+					height: 720,
+				},
+			},
+			{
+				id: "audio_1",
+				kind: "audio",
+				label: "vo.mp3",
+				originalPath: "/tmp/vo.mp3",
+				durationSec: 30,
+				cameraTrack: null,
+			},
+		],
+		transcripts: [{ assetId: "asset_1", language: "en", segments: [], words: [] }],
+		timeline: {
+			...sampleDoc.timeline,
+			clips: [
+				clipA,
+				{
+					...clipA,
+					id: "clip_b",
+					sourceStartSec: 10,
+					sourceEndSec: 20,
+					timelineStartSec: 10,
+					timelineEndSec: 20,
+				},
+			],
+			muteRanges: [{ startSec: 3, endSec: 4, reason: "pause" }],
+			captionRanges: [{ startSec: 1, endSec: 2, reason: "caption" }],
+		},
+		audioTracks: [
+			{
+				id: "trk_1",
+				assetId: "audio_1",
+				kind: "voiceover",
+				startMs: 0,
+				endMs: 5000,
+				durationSec: 30,
+				offsetMs: 0,
+				gainDb: 0,
+				loop: false,
+				fadeInMs: 0,
+				fadeOutMs: 0,
+				muted: false,
+				label: "vo.mp3",
+				origin: "user",
+			},
+		],
+		legacyEditor: { aspectRatio: "16:9" },
+	};
+
+	beforeEach(() => {
+		useProjectStore.getState().clear();
+		for (const mock of Object.values(bridgeMocks)) mock.mockReset();
+		bridgeMocks.save.mockImplementation(async (doc: typeof sampleDoc) => ({
+			success: true,
+			document: doc,
+		}));
+		useProjectStore.setState({
+			projectId: "proj_test",
+			document: contentDoc,
+			currentTimeSec: 1,
+			revision: 1,
+			status: "ready",
+			error: null,
+		});
+	});
+
+	afterEach(() => {
+		vi.clearAllMocks();
+	});
+
+	const addEveryKind = async (result: { current: Timeline }) => {
+		for (const kind of editKinds) {
+			await act(async () => {
+				await addOf[kind](result.current);
+			});
+		}
+	};
+
+	it.each(editKinds)("clears a timeline holding only a %s region", async (kind) => {
+		const { result } = renderTimeline();
+		await act(async () => {
+			await addOf[kind](result.current);
+		});
+		expect(regionCounts(useProjectStore.getState().document)).toEqual({
+			...noRegions,
+			[kind]: 1,
+		});
+		// What the button's visibility reads: the stored regions, the same ones it clears.
+		expect(result.current.hasEditRegions).toBe(true);
+
+		await act(async () => {
+			await result.current.clearTimeline();
+		});
+		expect(regionCounts(useProjectStore.getState().document)).toEqual(noRegions);
+		expect(result.current.hasEditRegions).toBe(false);
+	});
+
+	// A trim whose carrying clip is gone is stored but not drawn: `coalescedTrimGroups` drops
+	// it from the lane, and loading accepts it (no schema rule ties `clipId` to a clip). The
+	// button follows the STORED regions, or it would hide while the action still had one to clear.
+	it("counts and clears a stored trim whose clip no longer exists, though no pill shows it", async () => {
+		const orphanDoc: AxcutDocument = {
+			...contentDoc,
+			timeline: {
+				...contentDoc.timeline,
+				trimRanges: [
+					{
+						id: "trim_orphan",
+						assetId: "asset_1",
+						clipId: "clip_gone",
+						startSec: 1,
+						endSec: 3,
+						reason: "",
+						origin: "user",
+					},
+				],
+			},
+		};
+		// Loading keeps it: the schema does not tie a trim's `clipId` to an existing clip.
+		expect(parseDocumentFile(orphanDoc).timeline.trimRanges).toHaveLength(1);
+		useProjectStore.setState({ document: orphanDoc });
+		const { result } = renderTimeline();
+		expect(result.current.hasEditRegions).toBe(true);
+
+		await act(async () => {
+			await result.current.clearTimeline();
+		});
+		expect(useProjectStore.getState().document?.timeline.trimRanges).toEqual([]);
+		expect(result.current.hasEditRegions).toBe(false);
+	});
+
+	it("clears every region kind at once and keeps clips, media, audio, captions and transcript", async () => {
+		const { result } = renderTimeline();
+		await addEveryKind(result);
+		const before = useProjectStore.getState().document;
+		expect(regionCounts(before)).toEqual({
+			zoom: 1,
+			trim: 1,
+			annotation: 1,
+			speed: 1,
+			cameraFullscreen: 1,
+		});
+
+		await act(async () => {
+			await result.current.clearTimeline();
+		});
+		const after = useProjectStore.getState().document;
+		expect(regionCounts(after)).toEqual(noRegions);
+		expect(after?.timeline.clips).toEqual(before?.timeline.clips);
+		expect(after?.timeline.clips).toHaveLength(2);
+		expect(after?.assets).toEqual(before?.assets);
+		expect(after?.audioTracks).toEqual(before?.audioTracks);
+		expect(after?.audioTracks).toHaveLength(1);
+		expect(after?.transcripts).toEqual(before?.transcripts);
+		expect(after?.timeline.captionRanges).toEqual(before?.timeline.captionRanges);
+		expect(after?.timeline.muteRanges).toEqual(before?.timeline.muteRanges);
+		expect((after?.legacyEditor as { aspectRatio?: string }).aspectRatio).toBe("16:9");
+	});
+
+	it("is one undo step: a single Ctrl+Z restores every region, redo clears them again", async () => {
+		const { result } = renderTimeline();
+		await addEveryKind(result);
+		const before = useProjectStore.getState().document;
+		const stepsBefore = past.length;
+
+		await act(async () => {
+			await result.current.clearTimeline();
+		});
+		expect(past).toHaveLength(stepsBefore + 1);
+
+		act(() => {
+			expect(undo()).toBe(true);
+		});
+		expect(useProjectStore.getState().document).toEqual(before);
+		expect(regionCounts(useProjectStore.getState().document)).toEqual({
+			zoom: 1,
+			trim: 1,
+			annotation: 1,
+			speed: 1,
+			cameraFullscreen: 1,
+		});
+
+		act(() => {
+			expect(redo()).toBe(true);
+		});
+		expect(regionCounts(useProjectStore.getState().document)).toEqual(noRegions);
+	});
+
+	it("lets go of a selection that pointed at a region it just removed", async () => {
+		const { result } = renderTimeline();
+		// A fresh annotation is auto-selected.
+		await act(async () => {
+			await result.current.addAnnotation();
+		});
+		expect(result.current.selection?.kind).toBe("annotation");
+
+		await act(async () => {
+			await result.current.clearTimeline();
+		});
+		expect(result.current.selection).toBeNull();
+		expect(result.current.multiSelection).toEqual([]);
+	});
+
+	it("writes nothing when the timeline holds no edit region, whatever else it holds", async () => {
+		const { result } = renderTimeline();
+		// Audio track, captions and clips are all there, and none of them is an edit.
+		expect(result.current.hasEditRegions).toBe(false);
+		await act(async () => {
+			await result.current.clearTimeline();
+		});
+		expect(bridgeMocks.save).not.toHaveBeenCalled();
+		expect(past).toHaveLength(0);
+	});
 });
 
 describe("useTimeline zoom modifiers (rotation + focus mode)", () => {
@@ -764,11 +1047,11 @@ describe("useTimeline zoom modifiers (rotation + focus mode)", () => {
 	it("sets a 3D rotation preset on the region", async () => {
 		const { result } = renderTimeline();
 		await act(async () => {
-			await result.current.updateZoomRotation("zoom_a", "iso");
+			await result.current.updateZoomRotation("zoom_a", "left");
 		});
 		expect(useProjectStore.getState().document?.zoomRanges[0]).toMatchObject({
 			id: "zoom_a",
-			rotationPreset: "iso",
+			rotationPreset: "left",
 		});
 	});
 
@@ -777,7 +1060,7 @@ describe("useTimeline zoom modifiers (rotation + focus mode)", () => {
 		// optional and the native side treats anything unrecognised as zero rotation.
 		const { result } = renderTimeline();
 		await act(async () => {
-			await result.current.updateZoomRotation("zoom_a", "iso");
+			await result.current.updateZoomRotation("zoom_a", "left");
 		});
 		await act(async () => {
 			await result.current.updateZoomRotation("zoom_a", undefined);
@@ -803,13 +1086,13 @@ describe("useTimeline zoom modifiers (rotation + focus mode)", () => {
 		// One control, one field: a moving camera replaces a fixed angle instead of stacking on it.
 		const { result } = renderTimeline();
 		await act(async () => {
-			await result.current.updateZoomRotation("zoom_a", "iso");
+			await result.current.updateZoomRotation("zoom_a", "left");
 		});
 		await act(async () => {
-			await result.current.updateZoomRotation("zoom_a", "follow-cursor");
+			await result.current.updateZoomRotation("zoom_a", "orbit");
 		});
 		const zoom = useProjectStore.getState().document?.zoomRanges[0];
-		expect(zoom?.rotationPreset).toBe("follow-cursor");
+		expect(zoom?.rotationPreset).toBe("orbit");
 		expect(zoom).not.toHaveProperty("cameraMotion");
 	});
 
@@ -824,19 +1107,6 @@ describe("useTimeline zoom modifiers (rotation + focus mode)", () => {
 			await result.current.updateZoomHideCursor("zoom_a", false);
 		});
 		expect(useProjectStore.getState().document?.zoomRanges[0].hideCursor).toBeUndefined();
-	});
-
-	it("updates clickImpact on a zoom region and drops the key when off", async () => {
-		const { result } = renderTimeline();
-		await act(async () => {
-			await result.current.updateZoomClickImpact("zoom_a", true);
-		});
-		expect(useProjectStore.getState().document?.zoomRanges[0].clickImpact).toBe(true);
-
-		await act(async () => {
-			await result.current.updateZoomClickImpact("zoom_a", false);
-		});
-		expect(useProjectStore.getState().document?.zoomRanges[0].clickImpact).toBeUndefined();
 	});
 
 	it("rolls a live focus edit back when its commit cannot be saved", async () => {
@@ -894,6 +1164,79 @@ describe("useTimeline zoom modifiers (rotation + focus mode)", () => {
 		});
 
 		expect(useProjectStore.getState().document?.project.id).toBe("proj_other");
+	});
+});
+
+describe("useTimeline edits one region of a merged pill (#1017)", () => {
+	// One 4–13 s pill of two regions with the same properties: `zoom_x` on clip A, and
+	// `zoom_p` drawn across the A|B junction, stored as one fragment per clip.
+	const zoom = (id: string, clipId: string, startSec: number, endSec: number) => ({
+		id,
+		startMs: startSec * 1000,
+		endMs: endSec * 1000,
+		depth: 3 as const,
+		focus: { cx: 0.5, cy: 0.5 },
+		clipId,
+		// Both clips play the source at its own timeline position.
+		sourceStartSec: startSec,
+		sourceEndSec: endSec,
+	});
+	const clipA = sampleDoc.timeline.clips[0];
+	const docWithMergedPill: AxcutDocument = {
+		...sampleDoc,
+		timeline: {
+			...sampleDoc.timeline,
+			clips: [
+				clipA,
+				{
+					...clipA,
+					id: "clip_b",
+					sourceStartSec: 10,
+					sourceEndSec: 20,
+					timelineStartSec: 10,
+					timelineEndSec: 20,
+				},
+			],
+		},
+		zoomRanges: [
+			zoom("zoom_x", "clip_a", 4, 7),
+			zoom("zoom_p", "clip_a", 7, 10),
+			zoom("zoom_p_b", "clip_b", 10, 13),
+		],
+	};
+
+	beforeEach(() => {
+		useProjectStore.getState().clear();
+		for (const mock of Object.values(bridgeMocks)) mock.mockReset();
+		bridgeMocks.save.mockImplementation(async (doc: typeof sampleDoc) => ({
+			success: true,
+			document: doc,
+		}));
+		useProjectStore.setState({
+			projectId: "proj_test",
+			document: docWithMergedPill,
+			revision: 1,
+			status: "ready",
+			error: null,
+		});
+	});
+
+	it("changes the region picked and its fragments, not its look-alike, and the pill splits", async () => {
+		expect(coalesceRegionsForRuler(docWithMergedPill.zoomRanges)).toHaveLength(1);
+		const { result } = renderTimeline();
+		await act(async () => {
+			await result.current.updateZoomDepth("zoom_p_b", 2);
+		});
+		const zooms = useProjectStore.getState().document?.zoomRanges ?? [];
+		expect(zooms.map((z) => [z.id, z.depth])).toEqual([
+			["zoom_x", 3],
+			["zoom_p", 2],
+			["zoom_p_b", 2],
+		]);
+		expect(coalesceRegionsForRuler(zooms).map((p) => p.ids)).toEqual([
+			["zoom_x"],
+			["zoom_p", "zoom_p_b"],
+		]);
 	});
 });
 
@@ -959,6 +1302,8 @@ describe("useTimeline is not re-rendered by playhead ticks", () => {
 		expect(useProjectStore.getState().document?.zoomRanges.at(-1)).toMatchObject({
 			startMs: 4200,
 			endMs: 6200,
+			// Framing what the pointer does, not the middle of the screen.
+			focusMode: "auto",
 		});
 	});
 
@@ -1062,7 +1407,7 @@ describe("useTimeline save failures", () => {
 		let added: number | undefined;
 		await act(async () => {
 			added = await result.current.addZoomsBulk([
-				{ span: { start: 1000, end: 2000 }, focus: { cx: 0.5, cy: 0.5 } },
+				{ span: { start: 1000, end: 2000 }, focus: { cx: 0.5, cy: 0.5 }, depth: 3 },
 			]);
 		});
 
@@ -1258,7 +1603,7 @@ describe("useTimeline undo history", () => {
 		const { result } = renderTimeline();
 
 		const pDepth = result.current.updateZoomDepth("zoom_a", 4);
-		const pRotation = result.current.updateZoomRotation("zoom_a", "iso");
+		const pRotation = result.current.updateZoomRotation("zoom_a", "left");
 		await waitFor(() => expect(gate.release).toEqual(expect.any(Function)));
 		await act(async () => {
 			gate.release?.();
@@ -1267,32 +1612,7 @@ describe("useTimeline undo history", () => {
 
 		expect(useProjectStore.getState().document?.zoomRanges[0]).toMatchObject({
 			depth: 4,
-			rotationPreset: "iso",
-		});
-	});
-
-	// Rebase compatibility (#694 × current main): `updateZoomClickImpact` joined the zoom pane
-	// after this PR was authored, as one more one-field whole-document writer. While a level
-	// write is still pending, a click-impact toggle built from the render's document would
-	// rebuild the pill from the stale pre-level document — and whichever save landed last won,
-	// so the pending level could come back off. Click impact must share the zoom chain so both
-	// values survive.
-	it("keeps a pending zoom level when click impact toggles before it lands", async () => {
-		seed(docWithZoom);
-		const gate = gateFirstSave();
-		const { result } = renderTimeline();
-
-		const pDepth = result.current.updateZoomDepth("zoom_a", 4);
-		const pImpact = result.current.updateZoomClickImpact("zoom_a", true);
-		await waitFor(() => expect(gate.release).toEqual(expect.any(Function)));
-		await act(async () => {
-			gate.release?.();
-			await Promise.all([pDepth, pImpact]);
-		});
-
-		expect(useProjectStore.getState().document?.zoomRanges[0]).toMatchObject({
-			depth: 4,
-			clickImpact: true,
+			rotationPreset: "left",
 		});
 	});
 
@@ -1418,7 +1738,7 @@ describe("useTimeline undo history", () => {
 		expect(useProjectStore.getState().document?.zoomRanges[0]?.depth).toBe(4);
 
 		const gate = gateFirstSave();
-		const pRotation = result.current.updateZoomRotation("zoom_a", "iso");
+		const pRotation = result.current.updateZoomRotation("zoom_a", "left");
 		const pCursor = result.current.updateZoomHideCursor("zoom_a", true);
 		await waitFor(() => expect(gate.release).toEqual(expect.any(Function)));
 		let undid = false;
@@ -1452,7 +1772,7 @@ describe("useTimeline undo history", () => {
 		};
 
 		const gate = gateFirstSave();
-		const pRotation = result.current.updateZoomRotation("zoom_a", "iso");
+		const pRotation = result.current.updateZoomRotation("zoom_a", "left");
 		const pCursor = result.current.updateZoomHideCursor("zoom_a", true);
 		await waitFor(() => expect(gate.release).toEqual(expect.any(Function)));
 		bridgeMocks.get.mockResolvedValue({ success: true, document: projectB });
@@ -1518,7 +1838,7 @@ describe("useTimeline undo history", () => {
 			// A later zoom write is refused while that save is still unknown.
 			let rotationOk: boolean | undefined;
 			await act(async () => {
-				rotationOk = await result.current.updateZoomRotation("zoom_a", "iso");
+				rotationOk = await result.current.updateZoomRotation("zoom_a", "left");
 			});
 			expect(rotationOk).toBe(false);
 			expect(useProjectStore.getState().document?.zoomRanges[0]?.rotationPreset).toBeUndefined();
@@ -2021,7 +2341,8 @@ describe("useTimeline audio tracks", () => {
 		act(() => {
 			expect(undo()).toBe(true);
 		});
-		expect(useProjectStore.getState().document?.audioTracks[0]?.gainDb).toBe(0);
+		// Back to the level a new music bed is placed at.
+		expect(useProjectStore.getState().document?.audioTracks[0]?.gainDb).toBe(-18);
 	});
 
 	it("clamps a track to the content under it, like every other anchored region", async () => {
@@ -2272,7 +2593,7 @@ describe("useTimeline.addZoomsBulk reads the document at write time", () => {
 		let added: number | undefined;
 		await act(async () => {
 			added = await addZoomsBulk([
-				{ span: { start: 1000, end: 2000 }, focus: { cx: 0.5, cy: 0.5 } },
+				{ span: { start: 1000, end: 2000 }, focus: { cx: 0.5, cy: 0.5 }, depth: 3 },
 			]);
 		});
 
@@ -2306,7 +2627,7 @@ describe("useTimeline.addZoomsBulk reads the document at write time", () => {
 		let added: number | undefined;
 		await act(async () => {
 			added = await addZoomsBulk([
-				{ span: { start: 1000, end: 2000 }, focus: { cx: 0.5, cy: 0.5 } },
+				{ span: { start: 1000, end: 2000 }, focus: { cx: 0.5, cy: 0.5 }, depth: 3 },
 			]);
 		});
 

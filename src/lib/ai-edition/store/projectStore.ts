@@ -93,6 +93,9 @@ export async function saveWithDeadline(
 export type ProjectStatus = "idle" | "loading" | "ready" | "error";
 
 export interface DocumentWriteOptions {
+	/** For a whole-document proposal, drain overlapping saves and install only if
+	 *  its live base is still current. Ordinary editor writes keep their existing behavior. */
+	rejectSuperseded?: boolean;
 	/**
 	 * Record the outgoing document on the undo stack.
 	 *
@@ -545,7 +548,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 	},
 
 	async saveDocument(document, opts) {
+		const baseRevision = get().revision;
 		beginDocumentSave();
+		let saveEnded = false;
 		try {
 			// Read BEFORE the await, while `get().document` is still the pre-edit one.
 			// This is where undo history actually comes from: the editor writes through
@@ -574,6 +579,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 				// on the same IPC channel -- that puts the restored document back over them.
 				// `dirty` is deliberately left set for exactly that reason.
 				if (currentWriteEpoch() !== epoch) return false;
+				if (opts.rejectSuperseded) {
+					// Release this completed write before waiting for saves built from its old
+					// live base. A successful later save wins; if it fails, this confirmed
+					// disk write must still become the live document and an undoable edit.
+					endDocumentSave();
+					saveEnded = true;
+					while (documentSavesInFlight > 0) {
+						if ((await waitForDocumentSaves()) === "timeout") {
+							if (get().revision === baseRevision) set({ dirty: true });
+							return false;
+						}
+					}
+					if (get().revision !== baseRevision || currentWriteEpoch() !== epoch) return false;
+				}
 				const parsed = parseDocument(result.document);
 				set({
 					document: parsed,
@@ -604,7 +623,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 				return false;
 			}
 		} finally {
-			endDocumentSave();
+			if (!saveEnded) endDocumentSave();
 		}
 	},
 
