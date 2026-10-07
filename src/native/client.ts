@@ -198,11 +198,11 @@ export const nativeBridgeClient = {
 				action: "document.create",
 				payload: { title },
 			}),
-		save: (document: unknown) =>
+		save: (document: unknown, options?: { existingOnly?: boolean }) =>
 			requireNativeBridgeData<AiEditionDocumentResult>({
 				domain: "aiEdition",
 				action: "document.save",
-				payload: { document },
+				payload: { document, ...options },
 			}),
 		delete: (projectId: string) =>
 			requireNativeBridgeData<AiEditionDocumentResult>({

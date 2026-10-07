@@ -623,7 +623,7 @@ export type NativeBridgeRequest =
 	| {
 			domain: "aiEdition";
 			action: "document.save";
-			payload: { document: unknown };
+			payload: { document: unknown; existingOnly?: boolean };
 			requestId?: string;
 	  }
 	| {

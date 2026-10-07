@@ -531,9 +531,12 @@ function createShimBridgeClient() {
 				saveProjectsState();
 				return Promise.resolve({ success: true, document: doc });
 			},
-			save: (doc: ShimDocument) => {
+			save: (doc: ShimDocument, options?: { existingOnly?: boolean }) => {
 				const id = doc?.project?.id;
 				if (!id) return Promise.resolve({ success: false, error: "Document has no project id" });
+				if (options?.existingOnly && !documentsByProject[id]) {
+					return Promise.resolve({ success: false, error: `Project not found: ${id}` });
+				}
 				documentsByProject[id] = doc;
 				if (!projectOrder.includes(id)) projectOrder.unshift(id);
 				saveProjectsState();

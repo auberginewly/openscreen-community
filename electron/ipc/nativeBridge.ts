@@ -551,7 +551,7 @@ export function registerNativeBridgeHandlers(context: NativeBridgeContext) {
 						case "document.save":
 							return createSuccessResponse(
 								requestId,
-								await aiEditionService.save(request.payload.document),
+								await aiEditionService.save(request.payload.document, request.payload.existingOnly),
 							);
 						case "document.delete":
 							return createSuccessResponse(

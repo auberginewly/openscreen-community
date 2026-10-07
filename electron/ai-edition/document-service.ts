@@ -341,13 +341,13 @@ export class DocumentService {
 		return doc;
 	}
 
-	async saveProject(document: AxcutDocument): Promise<AxcutDocument> {
+	async saveProject(document: AxcutDocument, existingOnly = false): Promise<AxcutDocument> {
 		const parsed = documentSchema.parse(document);
 		const stamped: AxcutDocument = {
 			...parsed,
 			project: { ...parsed.project, updatedAt: new Date().toISOString() },
 		};
-		await this.writeProject(stamped);
+		await this.writeProject(stamped, existingOnly);
 		// After the write, never before: a derived file is not worth delaying the user's edit
 		// reaching disk, and a failure to generate one must not fail the save.
 		await ensureDocumentExtensions(stamped);
@@ -355,16 +355,18 @@ export class DocumentService {
 	}
 
 	async deleteProject(projectId: string): Promise<void> {
-		// Remove the canonical file and any lingering legacy `.axcut` for this id.
-		for (const filePath of [this.fileFor(projectId), this.legacyFileFor(projectId)]) {
-			try {
-				await fs.unlink(filePath);
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
-					throw error;
+		// A corrective save must not race deletion and recreate the project file.
+		await this.queueProjectWrite(projectId, async () => {
+			for (const filePath of [this.fileFor(projectId), this.legacyFileFor(projectId)]) {
+				try {
+					await fs.unlink(filePath);
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+						throw error;
+					}
 				}
 			}
-		}
+		});
 	}
 
 	async addAsset(projectId: string, input: AddAssetInput): Promise<AxcutDocument> {
@@ -476,14 +478,14 @@ export class DocumentService {
 	 * The queue alone would still leave a torn file on a crash; the rename alone
 	 * would still let two saves race for the same destination.
 	 */
-	private writeProject(doc: AxcutDocument): Promise<void> {
-		const projectId = doc.project.id;
+	private writeProject(doc: AxcutDocument, existingOnly = false): Promise<void> {
+		return this.queueProjectWrite(doc.project.id, () => this.writeProjectNow(doc, existingOnly));
+	}
+
+	private queueProjectWrite(projectId: string, write: () => Promise<void>): Promise<void> {
 		const tail = this.writeQueues.get(projectId) ?? Promise.resolve();
 		// Chained on both settlements: one save failing must not cancel the next.
-		const run = tail.then(
-			() => this.writeProjectNow(doc),
-			() => this.writeProjectNow(doc),
-		);
+		const run = tail.then(write, write);
 		const settled = run.catch(() => undefined);
 		this.writeQueues.set(projectId, settled);
 		void settled.then(() => {
@@ -493,9 +495,19 @@ export class DocumentService {
 		return run;
 	}
 
-	private async writeProjectNow(doc: AxcutDocument): Promise<void> {
+	private async writeProjectNow(doc: AxcutDocument, existingOnly: boolean): Promise<void> {
 		await this.ensureProjectsDir();
 		const filePath = this.fileFor(doc.project.id);
+		if (existingOnly) {
+			try {
+				await fs.access(filePath);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+					throw new DocumentNotFoundError(doc.project.id);
+				}
+				throw error;
+			}
+		}
 		// The suffix goes AFTER the extension on purpose: listProjects matches on a
 		// trailing `.openscreen`, so an interrupted write's leftover is invisible to
 		// it rather than showing up as a corrupt project. Unique per write, so two

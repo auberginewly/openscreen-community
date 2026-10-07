@@ -679,6 +679,45 @@ describe("DocumentService", () => {
 	// tail surviving past its end. The file parsed as JSON up to the splice and
 	// then died, taking the user's edits with it.
 	describe("concurrent saves", () => {
+		it.each([
+			"before-delete",
+			"after-delete",
+		])("does not recreate a project with a corrective save queued %s", async (order) => {
+			const doc = await service.createProject("Delete race");
+			const open = fs.open;
+			let release: (() => void) | undefined;
+			const held = vi.spyOn(fs, "open").mockImplementationOnce(async (file, flags, mode) => {
+				await new Promise<void>((resolve) => {
+					release = resolve;
+				});
+				return open(file, flags, mode);
+			});
+			const writing = service.saveProject(doc, order === "before-delete");
+			await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+			const deleting = service.deleteProject(doc.project.id);
+			const correcting = order === "after-delete" ? service.saveProject(doc, true) : writing;
+			const settled = Promise.allSettled([writing, deleting, correcting]);
+			try {
+				release?.();
+				const results = await settled;
+				expect(results[0].status).toBe("fulfilled");
+				expect(results[1].status).toBe("fulfilled");
+				if (order === "after-delete") {
+					expect(results[2]).toMatchObject({
+						status: "rejected",
+						reason: expect.any(DocumentNotFoundError),
+					});
+				}
+				await expect(service.getProject(doc.project.id)).rejects.toBeInstanceOf(
+					DocumentNotFoundError,
+				);
+			} finally {
+				release?.();
+				await settled;
+				held.mockRestore();
+			}
+		});
+
 		/** A document whose serialised length is driven by `annotations`. */
 		const withBulk = (doc: AxcutDocument, count: number): AxcutDocument => ({
 			...doc,

@@ -137,10 +137,10 @@ export class AiEditionService {
 		}
 	}
 
-	async save(document: unknown): Promise<AiEditionDocumentResult> {
+	async save(document: unknown, existingOnly = false): Promise<AiEditionDocumentResult> {
 		try {
 			const parsed = documentSchema.parse(document);
-			const saved = await this.options.documents.saveProject(parsed);
+			const saved = await this.options.documents.saveProject(parsed, existingOnly);
 			return { success: true, document: saved };
 		} catch (error) {
 			return {

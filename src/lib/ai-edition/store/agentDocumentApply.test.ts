@@ -6,7 +6,11 @@ import {
 	createAgentEditReview,
 	runAgentTurn,
 } from "./agentDocumentApply";
-import { DOCUMENT_SAVES_WAIT_TIMEOUT_MS, useProjectStore } from "./projectStore";
+import {
+	DOCUMENT_SAVES_WAIT_TIMEOUT_MS,
+	useProjectStore,
+	waitForDocumentSaves,
+} from "./projectStore";
 import { clearHistory, redo, undo } from "./undo";
 import { future, past } from "./undoStack";
 
@@ -134,11 +138,17 @@ describe("applyAgentDocumentIfCurrent", () => {
 		const proposal = { ...before, project: { ...before.project, title: "Agent" } };
 		const manual = { ...before, project: { ...before.project, title: "Manual" } };
 		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		let onDisk = before;
+		saveMock.mockImplementation(async (document) => {
+			onDisk = document;
+			return { success: true, document };
+		});
 		let release: (() => void) | undefined;
 		saveMock.mockImplementationOnce(async (document) => {
 			await new Promise<void>((resolve) => {
 				release = resolve;
 			});
+			onDisk = document;
 			return { success: true, document };
 		});
 		const applying = applyAgentDocumentIfCurrent(proposal, 4);
@@ -147,7 +157,140 @@ describe("applyAgentDocumentIfCurrent", () => {
 		release?.();
 		await expect(applying).resolves.toBe("save-failed");
 		expect(useProjectStore.getState().document).toBe(manual);
+		expect(onDisk).toBe(manual);
+		expect(useProjectStore.getState().revision).toBe(5);
+		expect(useProjectStore.getState().dirty).toBe(false);
+		expect(saveMock).toHaveBeenLastCalledWith(manual, { existingOnly: true });
 		expect(past).toHaveLength(1);
+	});
+
+	it("persists a live edit made during reconciliation without replacing its identity or undo history", async () => {
+		const before = createEmptyDocument({ projectId: "project_1", title: "Before" });
+		const titled = (title: string) => ({ ...before, project: { ...before.project, title } });
+		const manual = titled("Manual");
+		const latest = titled("Latest");
+		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		let onDisk = before;
+		const releases: Array<() => void> = [];
+		saveMock.mockImplementation(async (document) => {
+			if (releases.length < 2) {
+				await new Promise<void>((resolve) => releases.push(resolve));
+			}
+			onDisk = document;
+			return { success: true, document };
+		});
+		const applying = applyAgentDocumentIfCurrent(titled("Agent"), 4);
+		await vi.waitFor(() => expect(releases).toHaveLength(1));
+		useProjectStore.getState().setDocument(manual, { history: true });
+		releases[0]();
+		await vi.waitFor(() => expect(releases).toHaveLength(2));
+		useProjectStore.getState().setDocument(latest, { history: true });
+		releases[1]();
+		await expect(applying).resolves.toBe("save-failed");
+		expect(onDisk).toBe(latest);
+		expect(useProjectStore.getState().document).toBe(latest);
+		expect(useProjectStore.getState().revision).toBe(6);
+		expect(useProjectStore.getState().dirty).toBe(false);
+		expect(past).toHaveLength(2);
+		expect(undo()).toBe(true);
+		expect(useProjectStore.getState().document).toEqual(manual);
+	});
+
+	it.each([
+		true,
+		false,
+	])("drains an editor save overlapping reconciliation (success=%s)", async (success) => {
+		const before = createEmptyDocument({ projectId: "project_1", title: "Before" });
+		const titled = (title: string) => ({ ...before, project: { ...before.project, title } });
+		const manual = titled("Manual");
+		const latest = titled("Latest");
+		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		let onDisk = before;
+		const releases: Array<() => void> = [];
+		saveMock.mockImplementation(async (document) => {
+			await new Promise<void>((resolve) => releases.push(resolve));
+			if (document === latest && !success) return { success: false, error: "ENOSPC" };
+			onDisk = document;
+			return { success: true, document };
+		});
+		const applying = applyAgentDocumentIfCurrent(titled("Agent"), 4);
+		await vi.waitFor(() => expect(releases).toHaveLength(1));
+		useProjectStore.getState().setDocument(manual, { history: true });
+		releases[0]();
+		await vi.waitFor(() => expect(releases).toHaveLength(2));
+		const saving = useProjectStore.getState().saveDocument(latest, { history: true });
+		releases[1]();
+		releases[2]();
+		await expect(saving).resolves.toBe(success);
+		await expect(applying).resolves.toBe("save-failed");
+		expect(onDisk.project.title).toBe(success ? "Latest" : "Manual");
+		expect(useProjectStore.getState().document?.project.title).toBe(onDisk.project.title);
+		expect(useProjectStore.getState().dirty).toBe(false);
+		expect(past).toHaveLength(success ? 2 : 1);
+		await expect(waitForDocumentSaves()).resolves.toBe("idle");
+	});
+
+	it.each(["failure", "timeout"])("keeps a failed reconciliation dirty (%s)", async (outcome) => {
+		vi.useFakeTimers();
+		const before = createEmptyDocument({ projectId: "project_1", title: "Before" });
+		const proposal = { ...before, project: { ...before.project, title: "Agent" } };
+		const manual = { ...before, project: { ...before.project, title: "Manual" } };
+		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		const releases: Array<() => void> = [];
+		saveMock.mockImplementation(async (document) => {
+			await new Promise<void>((resolve) => releases.push(resolve));
+			return document === manual
+				? { success: false, error: "ENOSPC" }
+				: { success: true, document };
+		});
+		const applying = applyAgentDocumentIfCurrent(proposal, 4);
+		try {
+			await vi.advanceTimersByTimeAsync(0);
+			useProjectStore.getState().setDocument(manual, { history: true });
+			releases[0]();
+			await vi.advanceTimersByTimeAsync(0);
+			if (outcome === "failure") releases[1]();
+			else await vi.advanceTimersByTimeAsync(DOCUMENT_SAVES_WAIT_TIMEOUT_MS);
+			await expect(applying).resolves.toBe("save-failed");
+			expect(useProjectStore.getState().document).toBe(manual);
+			expect(useProjectStore.getState().dirty).toBe(true);
+			expect(past).toHaveLength(1);
+		} finally {
+			for (const release of releases) release();
+			await vi.advanceTimersByTimeAsync(0);
+			vi.useRealTimers();
+		}
+		await expect(waitForDocumentSaves()).resolves.toBe("idle");
+	});
+
+	it.each([
+		"before",
+		"during",
+	])("does not change a replacement project when cleared %s reconciliation", async (when) => {
+		const before = createEmptyDocument({ projectId: "project_1", title: "Before" });
+		const manual = { ...before, project: { ...before.project, title: "Manual" } };
+		const replacement = createEmptyDocument({ projectId: "project_2", title: "Other" });
+		useProjectStore.setState({ projectId: "project_1", document: before, revision: 4 });
+		const releases: Array<() => void> = [];
+		saveMock.mockImplementation(async (document) => {
+			await new Promise<void>((resolve) => releases.push(resolve));
+			return { success: true, document };
+		});
+		const applying = applyAgentDocumentIfCurrent(before, 4);
+		await vi.waitFor(() => expect(releases).toHaveLength(1));
+		useProjectStore.getState().setDocument(manual, { history: true });
+		if (when === "during") {
+			releases[0]();
+			await vi.waitFor(() => expect(releases).toHaveLength(2));
+		}
+		useProjectStore.getState().clear();
+		useProjectStore.setState({ projectId: "project_2", document: replacement, dirty: true });
+		for (const release of releases) release();
+		await expect(applying).resolves.toBe("save-failed");
+		expect(saveMock).toHaveBeenCalledTimes(when === "during" ? 2 : 1);
+		expect(useProjectStore.getState().document).toBe(replacement);
+		expect(useProjectStore.getState().dirty).toBe(true);
+		expect(past).toHaveLength(0);
 	});
 
 	it.each([

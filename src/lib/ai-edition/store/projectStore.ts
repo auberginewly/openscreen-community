@@ -549,6 +549,44 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 
 	async saveDocument(document, opts) {
 		const baseRevision = get().revision;
+		const projectId = get().projectId;
+		// The rejected proposal has already reached disk. Persist the current live
+		// edit without installing a response or recording another undo step. A drag
+		// can continue during this write, so check again and save its latest state.
+		const reconcileLiveDocument = async () => {
+			for (let attempt = 0; attempt < 3; attempt += 1) {
+				while (documentSavesInFlight > 0) {
+					if ((await waitForDocumentSaves()) === "timeout") return;
+				}
+				const live = get();
+				if (!projectId || live.projectId !== projectId || !live.document || !live.dirty) return;
+				const liveEpoch = currentWriteEpoch();
+				beginDocumentSave();
+				const saving = nativeBridgeClient.aiEdition
+					.save(live.document, { existingOnly: true })
+					.then((result) => {
+						if (!result.success || !result.document) {
+							throw new Error(result.error ?? "Failed to save project");
+						}
+						return true;
+					})
+					.finally(endDocumentSave);
+				if ((await saveWithDeadline(saving)) !== true) return;
+				while (documentSavesInFlight > 0) {
+					if ((await waitForDocumentSaves()) === "timeout") return;
+				}
+				const current = get();
+				if (
+					current.projectId === projectId &&
+					current.document === live.document &&
+					current.revision === live.revision &&
+					currentWriteEpoch() === liveEpoch
+				) {
+					set({ dirty: false, lastSavedAt: new Date() });
+					return;
+				}
+			}
+		};
 		beginDocumentSave();
 		let saveEnded = false;
 		try {
@@ -563,7 +601,9 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 			// is building on, and the await is where that world can change underneath it.
 			const epoch = currentWriteEpoch();
 			try {
-				const result = await nativeBridgeClient.aiEdition.save(document);
+				const result = opts.rejectSuperseded
+					? await nativeBridgeClient.aiEdition.save(document, { existingOnly: true })
+					: await nativeBridgeClient.aiEdition.save(document);
 				if (!result.success || !result.document) {
 					throw new Error(result.error ?? "Failed to save project");
 				}
@@ -578,7 +618,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 				// `useUndoRedoShortcuts`'s `onAfter` the moment it ran, so ordered after this one
 				// on the same IPC channel -- that puts the restored document back over them.
 				// `dirty` is deliberately left set for exactly that reason.
-				if (currentWriteEpoch() !== epoch) return false;
+				if (!opts.rejectSuperseded && currentWriteEpoch() !== epoch) return false;
 				if (opts.rejectSuperseded) {
 					// Release this completed write before waiting for saves built from its old
 					// live base. A successful later save wins; if it fails, this confirmed
@@ -587,11 +627,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
 					saveEnded = true;
 					while (documentSavesInFlight > 0) {
 						if ((await waitForDocumentSaves()) === "timeout") {
-							if (get().revision === baseRevision) set({ dirty: true });
+							if (get().projectId === projectId && get().revision === baseRevision) {
+								set({ dirty: true });
+							}
 							return false;
 						}
 					}
-					if (get().revision !== baseRevision || currentWriteEpoch() !== epoch) return false;
+					if (get().revision !== baseRevision || currentWriteEpoch() !== epoch) {
+						await reconcileLiveDocument();
+						return false;
+					}
 				}
 				const parsed = parseDocument(result.document);
 				set({

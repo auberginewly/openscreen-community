@@ -27,6 +27,27 @@ async function freshProjectId(): Promise<string> {
 	return id;
 }
 
+describe("browserShim corrective saves", () => {
+	it("saves an existing project but never recreates a deleted project", async () => {
+		const created = await nativeBridgeClient.aiEdition.create("Before");
+		const doc = asDoc(created.document);
+		const edited = { ...doc, project: { ...doc.project, title: "Manual" } };
+		await expect(
+			nativeBridgeClient.aiEdition.save(edited, { existingOnly: true }),
+		).resolves.toMatchObject({ success: true });
+		expect(
+			asDoc((await nativeBridgeClient.aiEdition.get(doc.project.id)).document).project.title,
+		).toBe("Manual");
+		await nativeBridgeClient.aiEdition.delete(doc.project.id);
+		await expect(
+			nativeBridgeClient.aiEdition.save(edited, { existingOnly: true }),
+		).resolves.toMatchObject({ success: false });
+		expect(await nativeBridgeClient.aiEdition.listProjects()).not.toContainEqual(
+			expect.objectContaining({ id: doc.project.id }),
+		);
+	});
+});
+
 describe("browserShim addAsset (issue #350)", () => {
 	it("keeps kind 'audio' and does not claim the empty primary slot", async () => {
 		const projectId = await freshProjectId();
