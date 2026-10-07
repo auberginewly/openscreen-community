@@ -1683,8 +1683,12 @@ function attachNativeMacCaptureOutputDrain(
 	});
 }
 
+/**
+ * Resolves with the helper's own stamp of its first appended frame: the file's t=0, and
+ * so the instant the HUD timer counts from (#901). Null from a helper that sends none.
+ */
 function waitForNativeMacCaptureStart(proc: ChildProcessWithoutNullStreams) {
-	return new Promise<void>((resolve, reject) => {
+	return new Promise<number | null>((resolve, reject) => {
 		const timer = setTimeout(() => {
 			cleanup();
 			reject(new Error("Timed out waiting for native macOS capture to start"));
@@ -1693,7 +1697,11 @@ function waitForNativeMacCaptureStart(proc: ChildProcessWithoutNullStreams) {
 		const inspect = (event: Record<string, unknown>) => {
 			if (event.event === "recording-started") {
 				cleanup();
-				resolve();
+				resolve(
+					typeof event.timestampMs === "number" && Number.isFinite(event.timestampMs)
+						? event.timestampMs
+						: null,
+				);
 				return;
 			}
 			if (event.event === "error") {
@@ -3166,8 +3174,7 @@ export function registerIpcHandlers(
 				},
 			);
 
-			await waitForNativeMacCaptureStart(proc);
-			const captureStartedAtMs = Date.now();
+			const captureStartedAtMs = (await waitForNativeMacCaptureStart(proc)) ?? Date.now();
 			const microphoneDefaulted =
 				request.audio.microphone.enabled && readMicrophoneDefaulted(nativeMacCaptureOutput);
 			if (microphoneDefaulted) {
@@ -3202,6 +3209,7 @@ export function registerIpcHandlers(
 				recordingId,
 				path: outputPath,
 				helperPath,
+				startedAtMs: captureStartedAtMs,
 				microphoneDefaulted,
 				microphoneUnavailable,
 			};
