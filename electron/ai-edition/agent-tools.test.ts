@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import {
 	type AxcutAnnotationRegion,
 	type AxcutDocument,
@@ -7,6 +8,7 @@ import {
 } from "../../src/lib/ai-edition/schema";
 import { ZOOM_DEPTH_SCALES } from "../../src/lib/ai-edition/timeline/zoom-scale";
 import { executeAgentTool, isMutatingTool, MUTATING_TOOL_NAMES } from "./agent-tools";
+import { measureTextInShippedFonts } from "./text-measure";
 
 /** ponytail: every fixture in this file starts from the SAME instant.
  *  `createEmptyDocument` reads the wall clock when a caller hands it no
@@ -447,8 +449,8 @@ describe("executeAgentTool", () => {
 	it("addZooms leaves overlapping regions overlapping, exactly as one-at-a-time does", () => {
 		// A deliberate non-decision, pinned so it stays deliberate.
 		//
-		// `timelineMap.ts` forbids two zooms of different identities from
-		// overlapping, but only the `set*` path clamps (via `replacePillSpan`) —
+		// `timelineMap.ts` forbids a moved zoom from overlapping another zoom,
+		// but only the `set*` path clamps (via `replacePillSpan`) —
 		// no `add*` does, in the agent OR in the UI. So two overlapping addZoom
 		// calls already produce an overlapping document today. Deconflicting
 		// inside the batch would make `addZooms` mean something its unitary
@@ -843,6 +845,60 @@ describe("executeAgentTool", () => {
 		).toBe(false);
 	});
 
+	it("fits a title to its words in the shipped font, in 16:9 and once switched to 9:16", () => {
+		// The e2e pass's turn: a bold Inter title at 64 px, then the vertical format. Measured with
+		// the estimate Node used to fall back on, the box held 554 px of text for 587 px of words,
+		// and the 9:16 export showed "Demo" with "OpenScreen" wrapped out of the box.
+		vi.stubEnv("OPENSCREEN_FONTS_DIR", path.resolve(__dirname, "../../public/fonts"));
+		try {
+			/** The room the box leaves its words, inside the plate, against their measured width. */
+			const room = (ann: AxcutAnnotationRegion | undefined, aspect: number) => {
+				if (!ann) throw new Error("no annotation");
+				const box = (ann.size.width / 100) * 1080 * aspect - 0.4 * ann.style.fontSize;
+				return box - measureTextInShippedFonts(ann.content ?? "", ann.style).width;
+			};
+			let document = executeAgentTool(
+				fixtureDocument(),
+				"setAspectRatio",
+				JSON.stringify({ aspectRatio: "16:9" }),
+			).document as AxcutDocument;
+			const added = executeAgentTool(
+				document,
+				"addAnnotation",
+				JSON.stringify({ startSec: 1, endSec: 4, text: "Demo OpenScreen", fontSize: 64, x: 50 }),
+			);
+			const id = JSON.parse(added.resultJson).annotationId;
+			document = added.document as AxcutDocument;
+			const wide = document.annotations.find((a) => a.id === id);
+			expect(wide?.style.fontSize).toBe(64);
+			expect(room(wide, 16 / 9)).toBeGreaterThan(0);
+
+			document = executeAgentTool(
+				document,
+				"setAspectRatio",
+				JSON.stringify({ aspectRatio: "9:16" }),
+			).document as AxcutDocument;
+			const tall = document.annotations.find((a) => a.id === id);
+			expect(room(tall, 9 / 16)).toBeGreaterThan(0);
+			expect(tall?.size.width).toBeLessThanOrEqual(100);
+			// 64 px of Inter bold does not fit a portrait frame's width: brought down just enough.
+			expect(tall?.style.fontSize).toBeLessThan(64);
+			expect(tall?.style.fontSize).toBeGreaterThan(55);
+			expect(centreOf(tall)).toEqual({ x: expect.closeTo(50, 5), y: expect.closeTo(50, 5) });
+
+			// Added straight into the portrait frame, the same title fits too.
+			const direct = executeAgentTool(
+				document,
+				"addAnnotation",
+				JSON.stringify({ startSec: 5, endSec: 6, text: "Demo OpenScreen", fontSize: 64 }),
+			).document?.annotations.at(-1);
+			expect(room(direct, 9 / 16)).toBeGreaterThan(0);
+			expect(direct?.size.width).toBeLessThanOrEqual(100);
+		} finally {
+			vi.unstubAllEnvs();
+		}
+	});
+
 	it("refuses a set that would run into another region, instead of landing it elsewhere", () => {
 		let document = fixtureDocument();
 		const add = (name: string, args: Record<string, unknown>) => {
@@ -876,6 +932,29 @@ describe("executeAgentTool", () => {
 		expect(
 			executeAgentTool(document, "setZoom", JSON.stringify({ zoomId, startSec: 3, endSec: 4 })).ok,
 		).toBe(true);
+
+		// A look-alike is in the way too: the drag would stop against it (#1133), so a set is
+		// refused rather than landed short of where it was asked.
+		add("addZoom", { startSec: 12, endSec: 14, depth: 2 });
+		expect(
+			executeAgentTool(document, "setZoom", JSON.stringify({ zoomId, startSec: 13, endSec: 15 }))
+				.ok,
+		).toBe(false);
+		add("addSpeed", { startSec: 20, endSec: 22, speed: 2 });
+		add("addSpeed", { startSec: 24, endSec: 26, speed: 2 });
+		const speedId = (
+			(document.legacyEditor as Record<string, unknown>).speedRegions as Array<{
+				id: string;
+				startMs: number;
+			}>
+		).find((r) => r.startMs === 20_000)?.id;
+		const speedBlocked = executeAgentTool(
+			document,
+			"setSpeed",
+			JSON.stringify({ speedId, startSec: 23, endSec: 25 }),
+		);
+		expect(speedBlocked.ok).toBe(false);
+		expect(speedBlocked.resultJson).toMatch(/cannot overlap/);
 	});
 
 	it("snapshot exposes clips/trims/effects as virtual-time groups with a time-base note", () => {

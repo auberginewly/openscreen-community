@@ -22,6 +22,7 @@ import {
 	collectAutoZoomSuggestionsForDocument,
 } from "../../src/lib/ai-edition/timeline/apply-auto-zooms";
 import type { CliDoneResult, CliRequest } from "../../src/lib/cliContracts";
+import { HIDDEN_WINDOWS_NOTE } from "../../src/lib/cliSourcePick";
 import type { CursorRecordingData, CursorRecordingSample } from "../../src/native/contracts";
 import { runDocumentTool } from "../ai-edition/deep-agent/service";
 import type { DocumentService } from "../ai-edition/document-service";
@@ -145,7 +146,7 @@ const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: f
 export const MEDIA_PREAMBLE = [
 	"OpenScreen records the screen, turns each take into a project you edit with the document tools, and exports it as a video.",
 	"A demo goes: listSources, then startRecording, then drive the app, then stopRecording. It returns the projectId and a checkpointId. Edit with the document tools, always passing that projectId: every edit is saved to the project straight away, and restoreCheckpoint with the checkpointId takes the project back to the raw take in one step. Then exportVideo, and getFrames with the projectId to check the export before you hand it over: it takes the same ruler seconds as the document tools, so a trim or a speed region never shifts what you look at.",
-	"Drive the app with the real mouse when you can: OpenScreen records the pointer, draws a clean cursor and zooms on each click. If you drive it from a script instead (Playwright, CDP), the screen pointer never moves: log each action as the script runs it, then hand the log to setPointerTrack after stopRecording.",
+	"Drive the app with the real mouse when you can: OpenScreen records the pointer, draws a clean cursor and zooms on the clicks as the editor does: clicks close in time and on screen share one zoom, and the first seconds and the end stay on the whole screen. If you drive it from a script instead (Playwright, CDP), the screen pointer never moves: log each action as the script runs it, then hand the log to setPointerTrack after stopRecording.",
 	"These projects are in the OpenScreen app's project list, so the user can open one in the editor. Do not edit a project while the user has it open there: the editor would keep its own copy.",
 	"",
 ].join("\n");
@@ -214,7 +215,7 @@ export function registerMediaTools(server: McpServer, deps: MediaToolDeps): void
 			{},
 		);
 		if (!seeded.ok || !seeded.document) throw new Error(seeded.resultJson);
-		// The zooms a recording made in the app starts with: one on each recorded click.
+		// The zooms a recording made in the app starts with, planned from its clicks (zoom-suggestions.ts).
 		const suggestions = await collectAutoZoomSuggestionsForDocument(
 			seeded.document,
 			deps.readCursor,
@@ -228,8 +229,7 @@ export function registerMediaTools(server: McpServer, deps: MediaToolDeps): void
 	server.registerTool(
 		"listSources",
 		{
-			description:
-				"List the displays and windows OpenScreen can record, and the microphones. Pass a display's index or part of a window's title to startRecording.",
+			description: `List the displays and windows OpenScreen can record, and the microphones. Pass a display's index or part of a window's title to startRecording. ${HIDDEN_WINDOWS_NOTE}`,
 			inputSchema: z.object({}),
 			annotations: READ_ONLY,
 		},
@@ -253,7 +253,7 @@ export function registerMediaTools(server: McpServer, deps: MediaToolDeps): void
 		"startRecording",
 		{
 			description:
-				"Start recording one window (preferred: nothing else on the desktop is captured) or one display. Returns once capture has started; then drive the app and call stopRecording. The pointer is recorded as data, so the export draws a clean cursor and zooms on the clicks. On Linux the desktop's own picker asks the user which window to record.",
+				"Start recording one window (preferred: nothing else on the desktop is captured) or one display. Returns once capture has started; then drive the app and call stopRecording. The pointer is recorded as data, so the export draws a clean cursor and the zooms planned from the clicks. On Linux the desktop's own picker asks the user which window to record.",
 			inputSchema: z.object({
 				window: z
 					.string()
@@ -318,7 +318,7 @@ export function registerMediaTools(server: McpServer, deps: MediaToolDeps): void
 		"stopRecording",
 		{
 			description:
-				"Stop the recording and turn the take into a new project, laid out as the editor lays out a fresh recording: one clip, plus a zoom on each recorded click. Returns the projectId to edit, a checkpointId that restores the raw take, and the take's videoPath.",
+				"Stop the recording and turn the take into a new project, laid out as the editor lays out a fresh recording: one clip, plus the zooms planned from the recorded clicks. Not one per click: clicks close in time and on screen share one zoom, a click in the first seconds or the one that stopped the take gets none, and autoZooms says how many there are. Returns the projectId to edit, a checkpointId that restores the raw take, and the take's videoPath.",
 			inputSchema: z.object({
 				title: z.string().optional().describe("The project's title in OpenScreen."),
 			}),
@@ -388,7 +388,7 @@ export function registerMediaTools(server: McpServer, deps: MediaToolDeps): void
 		"setPointerTrack",
 		{
 			description: [
-				"For a take driven by a script (Playwright, CDP, a browser extension) rather than the real mouse: the screen pointer never moved, so the video has no cursor and no zoom. Give the pointer's path here and OpenScreen draws it, gliding between your actions, and zooms on its clicks as for a real mouse. It replaces the pointer recorded with the take, then adds a zoom on each new click. Only for a take recorded by this server.",
+				"For a take driven by a script (Playwright, CDP, a browser extension) rather than the real mouse: the screen pointer never moved, so the video has no cursor and no zoom. Give the pointer's path here and OpenScreen draws it, gliding between your actions, and zooms on its clicks as for a real mouse. It replaces the pointer recorded with the take, then plans zooms on the new clicks as stopRecording does, clear of the zooms already there; autoZoomsAdded says how many. Only for a take recorded by this server.",
 				"events, one per action: `at` is Date.now() when your script did it (log it as it runs; the take's recordingStartedAt is on the same clock). `x` and `y` are fractions (0 to 1) of the recorded window. For a point (clientX, clientY) of a page shown in that window, from inside the page: border = (outerWidth - innerWidth) / 2; x = (border + clientX) / outerWidth; y = (outerHeight - innerHeight - border + clientY) / outerHeight.",
 			].join("\n"),
 			inputSchema: z.object({

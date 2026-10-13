@@ -65,7 +65,7 @@ Write a storyboard and show it to the user in a few lines, then carry on unless 
 3. `stopRecording` with a `title`. Keep what it returns: `projectId`, `checkpointId`, `videoPath`, `recordingStartedAt`.
 
 **How you drive the app decides the cursor.**
-- **Real mouse** (computer-use, or any tool that moves the actual pointer): OpenScreen records the pointer, draws a clean cursor and already zooms on each click. If your mouse tool cannot click in the app's window (some only read browsers, for one), drive it from a script instead.
+- **Real mouse** (computer-use, or any tool that moves the actual pointer): OpenScreen records the pointer, draws a clean cursor and already zooms on the clicks (see *Zoom on the action* below). If your mouse tool cannot click in the app's window (some only read browsers, for one), drive it from a script instead.
 - **A script** (Playwright, CDP): the screen pointer never moves, so the take has no cursor and no zoom. In the script, log every action as it runs: `at` is `Date.now()`, `x` and `y` are the action's position as fractions of the window, `click` is true for a click. Hand the log to `setPointerTrack` after `stopRecording`; its description gives the formula from a page's coordinates. A script also gives the cleanest take: same timing on every run, no hesitation.
 
 ## 5. Check the take
@@ -80,7 +80,7 @@ Use the document tools, always with the `projectId`. Read the project first with
 
 - **Format first:** `setAspectRatio` for where the video will be shown, `16:9` for X. Do it before placing text.
 - **Cut dead time:** the setup at the start, the stop at the end, any wait. Use `addTrims`, or `addSpeed` to fast-forward a wait instead of cutting it.
-- **Zoom on the action:** clicks close together share one zoom, and the first 2.5 s stay wide. Check them, then add or move zooms with `addZooms` and `setZoom` where a result deserves its own. Hold a zoom at least 1.5 s.
+- **Zoom on the action:** clicks close in time and on screen share one zoom, and the first 2.5 s stay wide. Check them, then add or move zooms with `addZooms` and `setZoom` where a result deserves its own. Hold a zoom at least 1.5 s.
 - **Callouts:** one `addAnnotation` per beat, short, placed clear of the action. Text sits on the output frame and stays put when the picture zooms. Use its look for hierarchy: a large title with `animation: "typewriter"`, step callouts with `animation: "pop"`. `setAnnotation` moves or restyles one.
 - **Undo:** `restoreCheckpoint` with the `checkpointId` takes the project back to the raw take in one step.
 

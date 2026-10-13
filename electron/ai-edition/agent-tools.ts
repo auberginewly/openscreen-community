@@ -17,7 +17,7 @@
 
 import { z } from "zod";
 import { DEFAULT_TEXT_PLATE } from "../../src/lib/ai-edition/annotations/background";
-import { fitTextBox } from "../../src/lib/ai-edition/annotations/placement";
+import { fitTextInFrame } from "../../src/lib/ai-edition/annotations/placement";
 import {
 	collapseTracksToPills,
 	patchAudioTrack,
@@ -67,6 +67,7 @@ import {
 } from "../../src/lib/ai-edition/timeline/zoom-transitions";
 import { SETTING_BOUNDS } from "../../src/lib/projectDefaults";
 import { ASPECT_RATIO_PRESETS } from "../../src/utils/aspectRatioUtils";
+import { measureTextInShippedFonts } from "./text-measure";
 
 export interface AgentToolExecution {
 	ok: boolean;
@@ -133,12 +134,13 @@ function resolveSpanMs(
 /**
  * For the effect set* tools: the region another span of the same kind would have to cross.
  *
- * `replacePillSpan` follows the editor's drag rule: a region dragged into a neighbour with other
- * settings stops against it, part of the way back to where it started. That is right under a
+ * `replacePillSpan` follows the editor's drag rule: a region dragged into a neighbour stops
+ * against it, part of the way back to where it started. That is right under a
  * mouse, which shows the stop as it happens. For a caller who named an exact span it put the
  * region somewhere it never asked for (asked 7.6 – 9.5 s, landed 1.5 – 3.3 s), so a set that
  * would be stopped is refused instead, naming what is in the way. The neighbours are the same
- * walls the drag rule sees: other pills with other settings, not ones the region already overlaps.
+ * walls the drag rule sees: every other pill, look-alikes included (#1133), but not one the region
+ * already overlaps.
  */
 function refuseIfBlocked<T extends { id: string; startMs: number; endMs: number }>(
 	kind: string,
@@ -154,7 +156,6 @@ function refuseIfBlocked<T extends { id: string; startMs: number; endMs: number 
 	const wall = pills.find(
 		(other) =>
 			other !== pill &&
-			other.identity !== pill.identity &&
 			(other.end <= pill.start || other.start >= pill.end) &&
 			other.start < end &&
 			other.end > start,
@@ -162,8 +163,8 @@ function refuseIfBlocked<T extends { id: string; startMs: number; endMs: number 
 	if (!wall) return null;
 	return failure(
 		`The ${kind} was NOT changed: ${formatSec(start)} – ${formatSec(end)} would run into ${kind} ` +
-			`${wall.ids[0]} at ${formatSec(wall.start)} – ${formatSec(wall.end)}, and two ${kind}s with ` +
-			"different settings cannot overlap. Move or shorten that one first, or pick a span clear of it.",
+			`${wall.ids[0]} at ${formatSec(wall.start)} – ${formatSec(wall.end)}, and two ${kind}s ` +
+			"cannot overlap. Move or shorten that one first, or pick a span clear of it.",
 	);
 }
 
@@ -200,7 +201,8 @@ function applyAnnotationLook(
 /**
  * A text annotation on the output frame, its box sized to its text around `center` (frame
  * percentages): what the editor's "add text" does, so the agent's text sits where the editor's
- * would, is measured the same, and stays put when the picture zooms.
+ * would, is measured in the same fonts, and stays put when the picture zooms. A size too large for
+ * the frame's width is brought down to fit on its line, as a format change does.
  */
 function placeTextOnFrame<T extends AxcutAnnotationRegion>(
 	region: T,
@@ -214,7 +216,7 @@ function placeTextOnFrame<T extends AxcutAnnotationRegion>(
 		position: center,
 		size: { width: 0, height: 0 },
 	};
-	return { ...centred, ...fitTextBox(centred, frameAspect) };
+	return fitTextInFrame(centred, frameAspect, measureTextInShippedFonts);
 }
 
 // v5: a modifier is stored as clip-anchored fragment(s), and adjacent regions with the
@@ -1461,8 +1463,13 @@ export function executeAgentTool(
 			const parsed = setAspectRatioArgs.safeParse(args);
 			if (!parsed.success) return failure(parsed.error.message);
 			const previous = getEditorSettings(document).aspectRatio;
-			// The editor's own write: the frame-placed annotations keep their shape and centre.
-			const next = applySettingsPatch(document, { aspectRatio: parsed.data.aspectRatio });
+			// The editor's own write: the frame-placed annotations keep their centre, and a text is
+			// refitted to its words in the new frame, measured in the shipped fonts.
+			const next = applySettingsPatch(
+				document,
+				{ aspectRatio: parsed.data.aspectRatio },
+				measureTextInShippedFonts,
+			);
 			return {
 				ok: true,
 				document: next,

@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { DesktopCapturerSource, Rectangle } from "electron";
+import type { DesktopCapturerSource, Rectangle, WebContents } from "electron";
 import {
 	app,
 	BrowserWindow,
@@ -43,11 +43,12 @@ import {
 	type RecordingSession,
 	type StoreRecordedSessionInput,
 } from "../../src/lib/recordingSession";
-import type {
-	CursorRecordingData,
-	CursorRecordingSample,
-	ProjectFileResult,
-	ProjectPathResult,
+import {
+	AI_EDITION_OPEN_PROJECT_CHANNEL,
+	type CursorRecordingData,
+	type CursorRecordingSample,
+	type ProjectFileResult,
+	type ProjectPathResult,
 } from "../../src/native/contracts";
 import { PRODUCT_NAME } from "../about";
 import {
@@ -5039,6 +5040,26 @@ export function registerIpcHandlers(
 		version: app.getVersion(),
 	};
 	const mcpController = new McpController(mcpSettings, mcpToolDeps);
+
+	// The editor says which project it holds, so `openscreen mcp`, a process of its own
+	// that cannot ask it, refuses to edit that project behind its back (#1138).
+	// Only the window that set the marker clears it, so an older window going away
+	// never unmarks the project a newer one holds.
+	let markedBy: WebContents | null = null;
+	const watchedEditors = new WeakSet<WebContents>();
+	ipcMain.on(AI_EDITION_OPEN_PROJECT_CHANNEL, (event, projectId: unknown) => {
+		const id = typeof projectId === "string" ? projectId : null;
+		if (id === null && markedBy !== null && markedBy !== event.sender) return;
+		markedBy = id === null ? null : event.sender;
+		aiEditionDocuments.markOpenInEditor(id);
+		if (watchedEditors.has(event.sender)) return;
+		watchedEditors.add(event.sender);
+		event.sender.once("destroyed", () => {
+			if (markedBy !== event.sender) return;
+			markedBy = null;
+			aiEditionDocuments.markOpenInEditor(null);
+		});
+	});
 
 	registerNativeBridgeHandlers({
 		getPlatform: () => process.platform,
