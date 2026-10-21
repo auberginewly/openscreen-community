@@ -314,7 +314,7 @@
 			"empty": "Chưa có cuộc trò chuyện nào.",
 			"msgsCount": "{{count}} tin nhắn · {{date}}"
 		},
-		"usageComplete": "{{tokens}} token · {{calls}} lượt gọi mô hình",
+		"usageComplete": "{{tokens}} token",
 		"usagePartial": "{{tokens}} token đã biết · chưa đầy đủ",
 		"usageUnavailable": "Không có dữ liệu sử dụng token",
 		"usageCoverage": "Đã tính {{counted}} trên {{calls}} lượt gọi mô hình",

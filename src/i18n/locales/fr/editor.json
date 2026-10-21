@@ -314,7 +314,7 @@
 			"empty": "Aucune conversation pour l'instant.",
 			"msgsCount": "{{count}} messages · {{date}}"
 		},
-		"usageComplete": "{{tokens}} tokens · {{calls}} appels au modèle",
+		"usageComplete": "{{tokens}} tokens",
 		"usagePartial": "{{tokens}} tokens connus · incomplet",
 		"usageUnavailable": "Utilisation des tokens indisponible",
 		"usageCoverage": "{{counted}} appels au modèle comptés sur {{calls}}",

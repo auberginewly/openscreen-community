@@ -110,6 +110,8 @@ import {
 import { createTurnUsageAccumulator } from "./usage";
 
 export interface OpenScreenAgentSink {
+	/** Latest cumulative usage from completed model calls; never sum stream chunks. */
+	usage?: (usage: AgentTurnUsage) => void;
 	text: (delta: string) => void;
 	/** Streaming delta from the model's reasoning block (Anthropic/MiniMax
 	 * thinking). Provider-agnostic — for providers without thinking this is
@@ -733,6 +735,9 @@ export async function invokeOpenScreenAgent(args: InvokeArgs): Promise<InvokeRes
 
 		for await (const event of stream) {
 			usage.observe(event);
+			if (event.event === "on_chat_model_end" || event.event === "on_chat_model_error") {
+				sink.usage?.(usage.snapshot());
+			}
 			const eventType = typeof event.event === "string" ? event.event : "";
 			const data = event.data as Record<string, unknown> | undefined;
 			const name = typeof event.name === "string" ? (event.name as string) : "";

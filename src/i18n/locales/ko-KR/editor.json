@@ -314,7 +314,7 @@
 			"empty": "아직 대화가 없습니다.",
 			"msgsCount": "메시지 {{count}}개 · {{date}}"
 		},
-		"usageComplete": "{{tokens}} 토큰 · 모델 호출 {{calls}}회",
+		"usageComplete": "{{tokens}} 토큰",
 		"usagePartial": "확인된 {{tokens}} 토큰 · 불완전",
 		"usageUnavailable": "토큰 사용량을 확인할 수 없음",
 		"usageCoverage": "모델 호출 {{calls}}회 중 {{counted}}회 집계",

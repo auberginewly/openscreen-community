@@ -314,7 +314,7 @@
 			"empty": "Zatím žádné konverzace.",
 			"msgsCount": "{{count}} zpráv · {{date}}"
 		},
-		"usageComplete": "{{tokens}} tokenů · {{calls}} volání modelu",
+		"usageComplete": "{{tokens}} tokenů",
 		"usagePartial": "{{tokens}} známých tokenů · neúplné",
 		"usageUnavailable": "Využití tokenů není dostupné",
 		"usageCoverage": "Započítáno {{counted}} z {{calls}} volání modelu",

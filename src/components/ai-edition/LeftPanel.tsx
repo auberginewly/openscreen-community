@@ -41,6 +41,7 @@ interface ChatDisplayMessage {
 	time?: string;
 	toolCalls?: AiEditionToolCallSummary[];
 	usage?: AgentTurnUsage;
+	durationMs?: number;
 	// ponytail: axcut parity — non-null on user messages that have a
 	// rewind-able document snapshot, so the per-message ↩ button shows.
 	checkpointId?: string | null;
@@ -441,6 +442,7 @@ export function ChatStripPanel() {
 	const [messages, setMessages] = useState<ChatDisplayMessage[]>([]);
 	const [input, setInput] = useState("");
 	const [busy, setBusy] = useState(false);
+	const [liveUsage, setLiveUsage] = useState<AgentTurnUsage>();
 	const [llmConfig, setLlmConfig] = useState<AiEditionLlmConfig | null>(null);
 	// The dialog itself is mounted in App.tsx so the app menu can reach it from every mode
 	// (issue #420); this panel only asks for it to be opened, and watches it close.
@@ -549,12 +551,16 @@ export function ChatStripPanel() {
 
 	// ponytail: subscribe to streamed chat events so the reasoning trace (and
 	// any future streaming text deltas) lands live instead of arriving all at
-	// once when chatRun resolves. We only act on `thinking` here — text deltas
+	// once when chatRun resolves. Usage updates report completed model calls; text deltas
 	// are ignored in the renderer today because the chat already renders the
 	// final assistant text on chatRun resolve, and a parallel live stream
 	// would race the final message. Add `text` handling when that flow lands.
 	useEffect(() => {
 		const unsubChatEvent = window.electronAPI.onAiEditionChatEvent((event: AiEditionChatEvent) => {
+			if (event.kind === "usage") {
+				if (event.sessionId === activeTurnRef.current?.sessionId) setLiveUsage(event.usage);
+				return;
+			}
 			if (event.kind !== "thinking") return;
 			if (event.sessionId !== thinkingRunSessionRef.current) return;
 			setThinkingText((prev) => prev + event.delta);
@@ -618,6 +624,7 @@ export function ChatStripPanel() {
 							time: m.createdAt,
 							toolCalls: m.toolCalls,
 							usage: m.usage,
+							durationMs: m.durationMs,
 							checkpointId: m.checkpointId ?? null,
 						})),
 					);
@@ -657,6 +664,7 @@ export function ChatStripPanel() {
 		transcriptVersionRef.current += 1;
 		setInput("");
 		setBusy(true);
+		setLiveUsage(undefined);
 		// ponytail: prepare the live reasoning-trace accumulator. Late events
 		// from a previous run (or from another panel/window) won't match this
 		// sessionId and are dropped by the subscription above.
@@ -761,6 +769,7 @@ export function ChatStripPanel() {
 						{
 							id: assistant.id,
 							usage: assistant.usage,
+							durationMs: assistant.durationMs,
 							role: "assistant",
 							content: assistant.content,
 							time: assistant.createdAt,
@@ -778,12 +787,13 @@ export function ChatStripPanel() {
 					const userMessage = result.userMessage;
 					setMessages((prev) =>
 						prev.map((message) =>
-							(message.id === optimisticUserId || message.id === userMessage.id)
+							message.id === optimisticUserId || message.id === userMessage.id
 								? {
 										...message,
 										id: userMessage.id,
 										checkpointId: userMessage.checkpointId ?? null,
 										usage: userMessage.usage,
+										durationMs: userMessage.durationMs,
 									}
 								: message,
 						),
@@ -876,6 +886,7 @@ export function ChatStripPanel() {
 						time: m.createdAt,
 						toolCalls: m.toolCalls,
 						usage: m.usage,
+						durationMs: m.durationMs,
 						checkpointId: m.checkpointId ?? null,
 					})),
 				);
@@ -1028,6 +1039,7 @@ export function ChatStripPanel() {
 					time: m.createdAt,
 					toolCalls: m.toolCalls,
 					usage: m.usage,
+					durationMs: m.durationMs,
 					checkpointId: m.checkpointId ?? null,
 				})),
 			);
@@ -1454,7 +1466,7 @@ export function ChatStripPanel() {
 										justifyContent: "flex-end",
 									}}
 								>
-									<ChatUsageSummary usage={m.usage} />
+									<ChatUsageSummary usage={m.usage} durationMs={m.durationMs} />
 									{m.role === "user" && m.checkpointId ? (
 										// The name stays "Rewind to this message"; the tip adds what it does, which
 										// only the confirmation dialog said before.
@@ -1545,50 +1557,30 @@ export function ChatStripPanel() {
 								) : null}
 							</div>
 						))}
-						{busy ? (
+						{busy &&
+						activeTurnRef.current?.projectId === projectId &&
+						activeTurnRef.current.sessionId === activeSessionId ? (
 							<div className={styles.msg} aria-live="polite">
 								<div className={styles.msgHead}>
 									<span className={styles.msgAuthor}>{t("chat.authorAssistant")}</span>
 								</div>
-								{thinkingText ? (
-									<div
-										style={{
-											display: "flex",
-											alignItems: "flex-start",
-											gap: 6,
-										}}
-									>
-										<Loader2
-											size={12}
-											className="animate-spin"
-											style={{
-												marginTop: 10,
-												flex: "0 0 auto",
-												color: "var(--muted)",
-											}}
-										/>
-										<div style={{ flex: 1, minWidth: 0 }}>
-											<ThinkingBlock
-												text={thinkingText}
-												expanded={thinkingExpanded}
-												onToggle={() => setThinkingExpanded((v) => !v)}
-												label={t("chat.thinking")}
-											/>
-										</div>
-									</div>
-								) : (
-									<div
-										className={styles.msgBubble}
-										style={{ color: "var(--muted)", fontStyle: "italic" }}
-									>
-										<Loader2
-											size={12}
-											className="animate-spin"
-											style={{ marginRight: 6, verticalAlign: "middle" }}
-										/>
+								<div
+									style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--muted)" }}
+								>
+									<Loader2 size={12} className="animate-spin" />
+									<span style={{ font: "500 12px/1.5 var(--font-body)" }}>
 										{t("chat.thinking")}
-									</div>
-								)}
+									</span>
+									<ChatUsageSummary usage={liveUsage} running />
+								</div>
+								{thinkingText ? (
+									<ThinkingBlock
+										text={thinkingText}
+										expanded={thinkingExpanded}
+										onToggle={() => setThinkingExpanded((v) => !v)}
+										label={t("chat.thinking")}
+									/>
+								) : null}
 							</div>
 						) : null}
 					</>

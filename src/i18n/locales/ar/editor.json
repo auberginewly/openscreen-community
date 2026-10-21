@@ -314,7 +314,7 @@
 			"empty": "لا توجد محادثات بعد.",
 			"msgsCount": "{{count}} رسالة · {{date}}"
 		},
-		"usageComplete": "{{tokens}} رمزًا · {{calls}} استدعاءات للنموذج",
+		"usageComplete": "{{tokens}} رمزًا",
 		"usagePartial": "{{tokens}} رمزًا معروفًا · غير مكتمل",
 		"usageUnavailable": "استخدام الرموز غير متاح",
 		"usageCoverage": "تم احتساب {{counted}} من {{calls}} استدعاءات للنموذج",

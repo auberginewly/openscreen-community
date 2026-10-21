@@ -314,7 +314,7 @@
 			"empty": "まだ会話はありません。",
 			"msgsCount": "{{count}} 件のメッセージ · {{date}}"
 		},
-		"usageComplete": "{{tokens}} トークン · モデル呼び出し {{calls}} 回",
+		"usageComplete": "{{tokens}} トークン",
 		"usagePartial": "既知の {{tokens}} トークン · 不完全",
 		"usageUnavailable": "トークン使用量を取得できません",
 		"usageCoverage": "モデル呼び出し {{calls}} 回中 {{counted}} 回を集計",

@@ -398,6 +398,8 @@ export interface AgentTurnUsage {
 }
 
 export interface AiEditionChatMessage {
+	/** Elapsed agent turn time, measured in the main process. Absent on older messages. */
+	durationMs?: number;
 	usage?: AgentTurnUsage;
 	id: string;
 	role: "user" | "assistant";
@@ -1037,6 +1039,7 @@ export type NativeBridgeEventName =
 export type AiEditionChatEvent =
 	| { kind: "text"; sessionId: string; delta: string }
 	| { kind: "thinking"; sessionId: string; delta: string }
+	| { kind: "usage"; sessionId: string; usage: AgentTurnUsage }
 	| { kind: "toolStart"; sessionId: string; name: string; args: unknown }
 	| { kind: "toolEnd"; sessionId: string; name: string; ok: boolean; summary?: string }
 	| { kind: "error"; sessionId: string; message: string };

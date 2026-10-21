@@ -314,7 +314,7 @@
 			"empty": "Ainda não há conversas.",
 			"msgsCount": "{{count}} mensagens · {{date}}"
 		},
-		"usageComplete": "{{tokens}} tokens · {{calls}} chamadas ao modelo",
+		"usageComplete": "{{tokens}} tokens",
 		"usagePartial": "{{tokens}} tokens conhecidos · incompleto",
 		"usageUnavailable": "Uso de tokens indisponível",
 		"usageCoverage": "{{counted}} de {{calls}} chamadas ao modelo contabilizadas",

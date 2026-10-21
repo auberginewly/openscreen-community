@@ -314,7 +314,7 @@
 			"empty": "Noch keine Unterhaltungen.",
 			"msgsCount": "{{count}} Nachr. · {{date}}"
 		},
-		"usageComplete": "{{tokens}} Tokens · {{calls}} Modellaufrufe",
+		"usageComplete": "{{tokens}} Tokens",
 		"usagePartial": "{{tokens}} bekannte Tokens · unvollständig",
 		"usageUnavailable": "Tokenverbrauch nicht verfügbar",
 		"usageCoverage": "{{counted}} von {{calls}} Modellaufrufen erfasst",

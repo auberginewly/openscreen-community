@@ -314,7 +314,7 @@
 			"empty": "暂无对话。",
 			"msgsCount": "{{count}} 条消息 · {{date}}"
 		},
-		"usageComplete": "{{tokens}} 个 token · {{calls}} 次模型调用",
+		"usageComplete": "{{tokens}} 个 token",
 		"usagePartial": "已知 {{tokens}} 个 token · 不完整",
 		"usageUnavailable": "Token 用量不可用",
 		"usageCoverage": "已统计 {{counted}} / {{calls}} 次模型调用",
