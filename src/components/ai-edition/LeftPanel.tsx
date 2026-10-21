@@ -1568,9 +1568,11 @@ export function ChatStripPanel() {
 									style={{ display: "flex", alignItems: "center", gap: 6, color: "var(--muted)" }}
 								>
 									<Loader2 size={12} className="animate-spin" />
-									<span style={{ font: "500 12px/1.5 var(--font-body)" }}>
-										{t("chat.thinking")}
-									</span>
+									{!thinkingText ? (
+										<span style={{ font: "500 12px/1.5 var(--font-body)" }}>
+											{t("chat.thinking")}
+										</span>
+									) : null}
 									<ChatUsageSummary usage={liveUsage} running />
 								</div>
 								{thinkingText ? (
