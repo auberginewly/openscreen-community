@@ -4149,8 +4149,6 @@ export function registerIpcHandlers(
 	ipcMain.handle(
 		"set-recording-state",
 		async (_, recording: boolean, recordingId?: number, cursorCaptureMode?: CursorCaptureMode) => {
-			const source = selectedSource || { name: "Screen" };
-			setAppRecording(recording, source.name, recordingId);
 			const normalizedCursorCaptureMode =
 				normalizeCursorCaptureMode(cursorCaptureMode) ?? "editable-overlay";
 			if (recording && normalizedCursorCaptureMode === "editable-overlay") {
@@ -4158,6 +4156,9 @@ export function registerIpcHandlers(
 			} else {
 				await stopCursorRecording();
 			}
+
+			const source = selectedSource || { name: "Screen" };
+			setAppRecording(recording, source.name, recordingId);
 		},
 	);
 
@@ -4901,6 +4902,9 @@ export function registerIpcHandlers(
 		currentProjectPath = null;
 		if (normalizedSession) {
 			mcpAppRecorder.takeSaved(normalizedSession.screenVideoPath);
+			// Every capture path stamps the session's `createdAt` with its recordingId (the
+			// `Date.now()` it started at), so it names the take `recordingCompletion` tracks.
+			// Any other session (an opened file) carries a fresh `Date.now()` and matches none.
 			recordingCompletion.saved(normalizedSession.createdAt, normalizedSession.screenVideoPath);
 		}
 		return { success: true, session: currentRecordingSession };
