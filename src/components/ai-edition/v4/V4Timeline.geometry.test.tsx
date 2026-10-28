@@ -2,7 +2,7 @@
 import "@testing-library/jest-dom";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { Profiler, type ProfilerOnRenderCallback } from "react";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The regression under test is geometric, so the environment has to have a size:
 // jsdom reports 0 for every box, which would leave `pxPerSec` at 0 (the
@@ -35,10 +35,13 @@ const measureText = vi.fn((text: string) => ({ width: text.length * 6 }));
 import { ShortcutsProvider } from "@/contexts/ShortcutsContext";
 import type { I18nNamespace } from "@/i18n/config";
 import { getAvailableLocales, translate } from "@/i18n/loader";
+import { useProjectStore } from "@/lib/ai-edition/store/projectStore";
 import type { useTimeline } from "@/lib/ai-edition/store/useTimeline";
 import { DEFAULT_SHORTCUTS, formatBinding } from "@/lib/shortcuts";
 import { zoomTransitionMs } from "@/lib/zoomMath/constants";
 import { V4Timeline } from "./V4Timeline";
+
+beforeEach(() => useProjectStore.setState({ currentTimeSec: 0 }));
 
 beforeAll(() => {
 	globalThis.ResizeObserver = class {
@@ -93,10 +96,9 @@ function clip(startSec: number, endSec: number) {
 	};
 }
 
-/** The asset every clip above points at. No `cameraTrack`: this recording has no webcam,
- *  which is what the Full Camera button is gated on. */
+/** The asset every clip above points at. With no camera, only screen-only is available. */
 const NO_CAMERA_ASSET = { id: "a1", label: "rec", durationSec: TOTAL_SEC };
-/** The same recording, with a camera track: the Full Camera button is offered. */
+/** The same recording with a camera track: camera layout presets become available. */
 const CAMERA_ASSET = {
 	...NO_CAMERA_ASSET,
 	cameraTrack: { sourcePath: "/tmp/cam.webm", startMs: 0, offsetMs: 0, visible: true },
@@ -122,6 +124,8 @@ function renderTimeline(
 		cameraFullscreenRegions: [],
 		shaderEffectRanges: [],
 		shaderEffects: [],
+		layoutSegments: [],
+		hasDoc: true,
 		zoomRegions: [],
 		trimRanges: [],
 		hasEditRegions: true,
@@ -147,9 +151,10 @@ function renderTimeline(
 	};
 	const setCurrentTime = vi.fn();
 	const onAnnotationRowCountChange = vi.fn();
-	const timeline = (
+	const timeline = (variant: "edit" | "media" = "edit") => (
 		<ShortcutsProvider>
 			<V4Timeline
+				variant={variant}
 				// Only the members the lanes and the clip row read are mocked; the prop
 				// stays typed as the real API rather than widened to `any` (AGENTS.md).
 				tl={tl as unknown as ReturnType<typeof useTimeline>}
@@ -162,16 +167,17 @@ function renderTimeline(
 			/>
 		</ShortcutsProvider>
 	);
-	render(
+	const view = render(
 		onRender ? (
 			<Profiler id="timeline" onRender={onRender}>
-				{timeline}
+				{timeline()}
 			</Profiler>
 		) : (
-			timeline
+			timeline()
 		),
 	);
 	return {
+		rerenderVariant: (variant: "edit" | "media") => view.rerender(timeline(variant)),
 		onAnnotationRowCountChange,
 		// A getter: a test that empties `annotationRegions` renders no such pill, and an eager
 		// lookup would throw before its own assertions ran.
@@ -638,7 +644,7 @@ describe("V4Timeline create-from-toolbar", () => {
 		expect(tl.clearTimeline).toHaveBeenCalledTimes(1);
 	});
 
-	it("puts Clear timeline last, behind a divider, after the Add Full Camera button", () => {
+	it("puts Clear timeline last, behind a divider, after the layout button", () => {
 		renderTimeline(undefined, undefined, [CAMERA_ASSET]);
 		const toolbar = toolbarOf();
 		const buttons = Array.from(toolbar.querySelectorAll("button"));
@@ -647,25 +653,86 @@ describe("V4Timeline create-from-toolbar", () => {
 
 		const divider = clear.previousElementSibling;
 		expect(divider?.className).toContain("tlToolSep");
-		expect(divider?.previousElementSibling).toBe(
-			screen.getByLabelText("buttons.addCameraFullscreen"),
-		);
+		expect(divider?.previousElementSibling).toBe(screen.getByLabelText("layouts.changeHere"));
 		expect(dividersIn(toolbar)).toHaveLength(2);
 	});
 
-	// #353. A camera-fullscreen region grows the webcam overlay, so with no webcam on the
-	// timeline it renders nothing in the preview and nothing in the export — the region is
-	// stored and forgotten. `addCameraFullscreen` now refuses to write one; the button says
-	// so before it is clicked instead of looking like it worked. Absent, not greyed out: an
-	// inoperative control is hidden, and a greyed one with no reason is a puzzle.
-	it("shows no Add Full Camera button when no clip on the timeline has a camera", () => {
-		renderTimeline();
-		expect(screen.queryByLabelText("buttons.addCameraFullscreen")).not.toBeInTheDocument();
+	it.each([
+		"media",
+		"no-document",
+		"empty-timeline",
+	] as const)("closes the layout picker and ignores shortcuts while %s, without reopening on return", (condition) => {
+		const { tl, rerenderVariant } = renderTimeline();
+		const clips = tl.clips;
+		const openPicker = () => act(() => window.dispatchEvent(new Event("openscreen:change-layout")));
+		openPicker();
+		expect(screen.getByRole("group", { name: "layouts.title" })).toBeInTheDocument();
+		if (condition === "no-document") tl.hasDoc = false;
+		if (condition === "empty-timeline") tl.clips = [];
+		rerenderVariant(condition === "media" ? "media" : "edit");
+		expect(screen.queryByRole("group", { name: "layouts.title" })).not.toBeInTheDocument();
+		openPicker();
+		tl.hasDoc = true;
+		tl.clips = clips;
+		rerenderVariant("edit");
+		expect(screen.queryByRole("group", { name: "layouts.title" })).not.toBeInTheDocument();
+		openPicker();
+		expect(screen.getByRole("group", { name: "layouts.title" })).toBeInTheDocument();
 	});
 
-	it("shows Add Full Camera as soon as a clip's asset carries one", () => {
-		renderTimeline(undefined, undefined, [CAMERA_ASSET]);
-		expect(screen.getByLabelText("buttons.addCameraFullscreen")).toBeEnabled();
+	it("keeps layout changes available for screen-only footage", () => {
+		renderTimeline();
+		const button = screen.getByRole("button", { name: "layouts.changeHere" });
+		expect(button).toBeEnabled();
+		expect(button).toHaveTextContent("");
+	});
+
+	it("only offers a layout change inside footage and closes its menu at gaps and the final end", () => {
+		renderTimeline([clip(2, 4), clip(8, 12)]);
+		const button = screen.getByRole("button", { name: "layouts.changeHere" });
+		const seek = (currentTimeSec: number) =>
+			act(() => useProjectStore.setState({ currentTimeSec }));
+		const open = () => act(() => window.dispatchEvent(new Event("openscreen:change-layout")));
+		const menu = () => screen.queryByRole("group", { name: "layouts.title" });
+		expect(button).toBeDisabled();
+		open();
+		expect(menu()).not.toBeInTheDocument();
+		seek(2);
+		expect(button).toBeEnabled();
+		fireEvent.click(button);
+		expect(menu()).toBeInTheDocument();
+		seek(3.999);
+		expect(button).toBeEnabled();
+		expect(menu()).toBeInTheDocument();
+		seek(4);
+		expect(button).toBeDisabled();
+		expect(menu()).not.toBeInTheDocument();
+		open();
+		expect(menu()).not.toBeInTheDocument();
+		seek(6);
+		expect(button).toBeDisabled();
+		seek(8);
+		expect(button).toBeEnabled();
+		expect(menu()).not.toBeInTheDocument();
+		open();
+		expect(menu()).toBeInTheDocument();
+		seek(12);
+		expect(button).toBeDisabled();
+		expect(menu()).not.toBeInTheDocument();
+		open();
+		expect(menu()).not.toBeInTheDocument();
+		seek(13);
+		expect(button).toBeDisabled();
+	});
+
+	it("enables layout changes as soon as a clip's asset carries one", () => {
+		renderTimeline(undefined, undefined, [
+			{
+				...NO_CAMERA_ASSET,
+				cameraTrack: { sourcePath: "/tmp/cam.webm", startMs: 0, offsetMs: 0, visible: true },
+			},
+		]);
+		expect(screen.getByRole("button", { name: "layouts.changeHere" })).toBeEnabled();
 	});
 
 	// The disabled button is only half the promise: an empty lane advertises the shortcut
@@ -674,7 +741,7 @@ describe("V4Timeline create-from-toolbar", () => {
 	// instead, so the two surfaces agree about the same project.
 	it("does not advertise the C shortcut on a lane that cannot be filled", () => {
 		renderTimeline();
-		expect(screen.getByText("layout.noWebcam")).toBeInTheDocument();
+		expect(screen.queryByTestId("layout-lane")).not.toBeInTheDocument();
 		expect(screen.queryByText("hints.pressCameraFullscreen")).not.toBeInTheDocument();
 	});
 
@@ -685,7 +752,7 @@ describe("V4Timeline create-from-toolbar", () => {
 				cameraTrack: { sourcePath: "/tmp/cam.webm", startMs: 0, offsetMs: 0, visible: true },
 			},
 		]);
-		expect(screen.getByText("hints.pressCameraFullscreen")).toBeInTheDocument();
+		expect(screen.queryByTestId("layout-lane")).not.toBeInTheDocument();
 		expect(screen.queryByText("layout.noWebcam")).not.toBeInTheDocument();
 	});
 });
@@ -842,6 +909,8 @@ describe("V4Timeline audio lane drag", () => {
 			annotationRegions: [],
 			speedRegions: [],
 			cameraFullscreenRegions: [],
+			layoutSegments: [],
+			hasDoc: true,
 			shaderEffectRanges: [],
 			shaderEffects: [],
 			zoomRegions: [],
@@ -1060,7 +1129,9 @@ describe("V4Timeline empty-lane hints", () => {
 		expect(screen.getByText("Press Z to add zoom")).toBeInTheDocument();
 		expect(screen.getByText("Press T to add trim")).toBeInTheDocument();
 		expect(screen.getByText("Press S to add speed")).toBeInTheDocument();
-		expect(screen.getByText("Press C to add a Full Camera segment")).toBeInTheDocument();
+		expect(
+			screen.getByLabelText(translate("en", "timeline", "layouts.changeHere")),
+		).toBeInTheDocument();
 		expect(screen.getByText("Press M to add audio, V to record a voiceover")).toBeInTheDocument();
 	});
 
@@ -1089,7 +1160,9 @@ describe("V4Timeline empty-lane hints", () => {
 		expect(screen.getByText("Press Ctrl + Shift + T to add trim")).toBeInTheDocument();
 		expect(screen.getByText("Press N to add annotation")).toBeInTheDocument();
 		expect(screen.getByText("Press J to add speed")).toBeInTheDocument();
-		expect(screen.getByText("Press K to add a Full Camera segment")).toBeInTheDocument();
+		expect(
+			screen.getByLabelText(translate("en", "timeline", "layouts.changeHere")),
+		).toBeInTheDocument();
 		expect(
 			screen.getByText("Press U to add audio, Alt + R to record a voiceover"),
 		).toBeInTheDocument();
@@ -1150,7 +1223,7 @@ describe("V4Timeline toolbar tooltips", () => {
 			"buttons.addTrim",
 			"buttons.addSpeed",
 			"buttons.addAnnotation",
-			"buttons.addCameraFullscreen",
+			"layouts.changeHere",
 			// Its menu also records a voiceover, but the key, like the lane's "Press M", adds audio.
 			"toolbar.addAudioTooltip",
 		]) {
@@ -1163,7 +1236,7 @@ describe("V4Timeline toolbar tooltips", () => {
 			"buttons.addTrim": "T",
 			"buttons.addSpeed": "S",
 			"buttons.addAnnotation": "A",
-			"buttons.addCameraFullscreen": "C",
+			"layouts.changeHere": "C",
 			"toolbar.addAudioTooltip": "M",
 		});
 	});

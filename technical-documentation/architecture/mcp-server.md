@@ -235,3 +235,23 @@ codex mcp add openscreen -- "<executable>" mcp
 - **No project deletion**, on purpose ([above](#the-project-and-its-media)).
 - **An imported recording comes without its camera.** The editor's import links the webcam an OpenScreen recording was made with (`find-recording-camera`); `importMedia` and `createProject` do not, so the camera of a recording imported over MCP is not in the project.
 - **A transcription reports no progress.** `transcribe` answers once Whisper is done, which can outlast a client's own tool timeout on a long recording. In the app, the editor cancelling its own run (a regenerate in another language) also stops an MCP run of the same engine, which then reports a failure.
+
+
+## Layout editing
+
+The shared tool registry exposes `addLayoutChange(timeSec, preset)`,
+`setLayoutPreset(layoutId, preset)` and `moveLayoutBoundary(layoutId, timeSec)`.
+`getCurrentDocument` and write results expose `layoutSegments` with logical IDs,
+RAW timeline bounds and presets. `removeModifier` removes a change and extends its
+predecessor; the first passage is protected. Presets are picture-in-picture,
+dual-frame, vertical-stack, camera-only and no-webcam. Camera presets require linked
+camera footage. A temporary passage needs a change at its start and another at its end.
+`setEditorSettings.webcamLayoutPreset` applies to the whole video; use the passage
+tools for a local edit. Compatibility Full Camera executor aliases are not advertised.
+
+HTTP and stdio obtain schemas and descriptions from `TOOL_ARG_SCHEMAS` and
+`TOOL_DESCRIPTIONS`. Both call `runDocumentTool` and `executeAgentTool`; the shared MCP
+runner checks mutation consent with `isMutatingTool` before executing a write. The MCP
+HTTP tests exercise a real client/server add/move/set/read/remove cycle, compare the
+document and native scene with the UI's shared mutations, verify the preset enum and
+mutation annotations, and refuse all three layout writes when MCP edits are disabled.
