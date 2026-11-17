@@ -1,0 +1,12 @@
+{
+  "projectId": "proj_ffffcc90-47e7-4d8a-b591-ac0aa5d89c73",
+  "observations": [
+    "import modal covers the viewport; target and file controls are accessible",
+    "actual Electron file input import: two BOM/CRLF cues persisted via native document bridge",
+    "one Undo removes the import, one Redo restores it, both native-saved",
+    "cancelled replacement leaves existing transcript unchanged",
+    "reversed cue displays cue/line error and preserves prior transcript",
+    "confirmed replacement saves and a single Undo restores both original cues",
+    "full Electron restart restores imported source-timed cues and original timeline"
+  ]
+}
